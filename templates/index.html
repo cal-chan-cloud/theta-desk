@@ -1,0 +1,329 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Theta Desk</title>
+<link rel="stylesheet" href="/static/styles.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='8' fill='%233987e5'/><text x='16' y='23' font-size='20' font-family='sans-serif' font-weight='700' fill='white' text-anchor='middle'>θ</text></svg>">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">
+    <div class="brand-mark">θ</div>
+    <div>
+      <h1>Theta Desk</h1>
+      <div class="tag">options research</div>
+    </div>
+  </div>
+
+  <nav class="tabs" id="tabs">
+    <button data-view="dashboard" aria-current="true">Dashboard<kbd>1</kbd></button>
+    <button data-view="trades">Daily Trades<kbd>2</kbd></button>
+    <button data-view="symbol">Symbol<kbd>3</kbd></button>
+    <button data-view="chain">Chain<kbd>4</kbd></button>
+    <button data-view="flow">Flow<kbd>5</kbd></button>
+    <button data-view="journal">Journal<kbd>6</kbd></button>
+    <button data-view="tools">Tools<kbd>7</kbd></button>
+  </nav>
+
+  <div class="topbar-right">
+    <span class="ticker" id="marketPill"><span class="status-dot"></span><span class="v">--</span></span>
+    <span class="ticker hide-sm" id="vixPill"><span class="k">VIX</span><span class="v">--</span></span>
+    <span class="ticker hide-sm" id="spxPill"><span class="k">SPX</span><span class="v">--</span></span>
+    <button class="btn icon" id="searchBtn" title="Find a symbol (press /)">⌕</button>
+    <button class="btn" id="refreshBtn">Refresh</button>
+    <button class="btn icon" id="themeBtn" title="Toggle light / dark">◐</button>
+    <a class="btn icon" id="logoutBtn" href="/logout" title="Log out" hidden>⏻</a>
+  </div>
+</header>
+
+<main>
+  <!-- ============================================================ DASHBOARD -->
+  <section class="view active" id="view-dashboard">
+    <div class="card">
+      <div class="tiles" id="marketTiles"></div>
+    </div>
+
+    <div class="card">
+      <div class="card-head">
+        <div>
+          <h3>Watchlist</h3>
+          <p class="hint">
+            <b>Vol edge</b> is implied against a jump-robust forecast of realised vol — positive means
+            premium is rich. <b>IV rank</b> builds from this desk's own snapshots and reads
+            &ldquo;--&rdquo; until enough sessions accumulate; <b>HV rank</b> comes from two years of
+            price history and is meaningful today. Click any row for the full symbol view.
+          </p>
+        </div>
+      </div>
+      <div class="row tight">
+        <span class="search-wrap"><input type="search" id="wlFilter" placeholder="Filter symbols" aria-label="Filter symbols"></span>
+        <label class="check"><input type="checkbox" id="wlOnlyEarnings"> earnings &lt; 30d</label>
+        <label class="check"><input type="checkbox" id="wlOnlyRich"> IV rich</label>
+        <label class="check"><input type="checkbox" id="wlOnlyCheap"> IV cheap</label>
+        <span class="muted" id="wlCount" style="margin-left:auto;font-size:11.5px"></span>
+      </div>
+      <div class="table-wrap">
+        <table class="data-table" id="watchlist">
+          <thead><tr id="wlHead"></tr></thead>
+          <tbody id="wlBody"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="grid c2">
+      <div class="card"><div id="chartIvVsForecast"></div></div>
+      <div class="card"><div id="chartTrendVsVol"></div></div>
+    </div>
+
+    <div class="card">
+      <div class="card-head">
+        <div>
+          <h3>Market headlines</h3>
+          <p class="hint">Scored with a finance-specific lexicon. The rail on the left carries the
+            direction so it is never colour alone.</p>
+        </div>
+      </div>
+      <div id="marketNews" class="news-list"></div>
+    </div>
+  </section>
+
+  <!-- =============================================================== TRADES -->
+  <section class="view" id="view-trades">
+    <div class="card">
+      <div class="card-head">
+        <div>
+          <h3>Daily trade board</h3>
+          <p class="hint">
+            Ranked on model expectancy, vol edge, trend agreement, affordability, liquidity, dealer
+            positioning and news. Expectancy is computed against a density recovered from the option
+            chain itself and re-centred on the forecast vol — not a lognormal guess.
+            <b>Every price assumes you give up a quarter of the bid–ask on each leg.</b>
+          </p>
+        </div>
+      </div>
+      <div class="row tight">
+        <span class="field">Board <select id="ideaDate"></select></span>
+        <span class="field">Structure <select id="ideaStrat"><option value="">all</option></select></span>
+        <span class="field">Direction <select id="ideaDir">
+          <option value="">all</option><option>bullish</option><option>bearish</option>
+          <option>neutral</option><option>volatility</option></select></span>
+        <span class="field">Sort <select id="ideaSort">
+          <option value="score">score</option>
+          <option value="ev_per_risk">expectancy</option>
+          <option value="pop">probability of profit</option>
+          <option value="risk">risk (low first)</option>
+          <option value="dte">days to expiry</option></select></span>
+        <label class="check"><input type="checkbox" id="ideaDefinedOnly" checked> defined risk only</label>
+        <label class="check"><input type="checkbox" id="ideaAffordable"> fits my risk budget</label>
+        <span class="muted" id="ideaCount" style="margin-left:auto;font-size:11.5px"></span>
+      </div>
+    </div>
+    <div id="ideaList"></div>
+  </section>
+
+  <!-- =============================================================== SYMBOL -->
+  <section class="view" id="view-symbol">
+    <div class="card">
+      <div class="row tight">
+        <span class="field">Symbol <select id="symPick"></select></span>
+        <button class="btn" id="symRefresh">Refresh this symbol</button>
+        <button class="btn" id="symToChain">Open chain</button>
+        <span class="muted" id="symAsof" style="margin-left:auto;font-size:11.5px"></span>
+      </div>
+      <div class="tiles" id="symTiles"></div>
+    </div>
+
+    <div class="card"><div id="chartPrice"></div></div>
+
+    <div class="grid c2">
+      <div class="card"><div id="chartTerm"></div></div>
+      <div class="card"><div id="chartSmile"></div></div>
+      <div class="card"><div id="chartGamma"></div></div>
+      <div class="card"><div id="chartOI"></div></div>
+      <div class="card"><div id="chartIvHist"></div></div>
+      <div class="card"><div id="chartExpMove"></div></div>
+    </div>
+
+    <div class="grid c2">
+      <div class="card">
+        <div class="card-head">
+          <div>
+            <h3>Expiry metrics</h3>
+            <p class="hint">Forward and discount factor are recovered per expiry from put–call
+              parity, so implied vol is never distorted by a guessed dividend yield.</p>
+          </div>
+        </div>
+        <div class="table-wrap"><table class="data-table" id="expTable"></table></div>
+      </div>
+      <div class="card">
+        <div class="card-head"><div><h3>Volatility &amp; trend detail</h3></div></div>
+        <div class="grid c3" style="gap:26px">
+          <div>
+            <p class="section-title">Realised volatility</p>
+            <dl class="kv" id="volDetail"></dl>
+          </div>
+          <div>
+            <p class="section-title">Trend components</p>
+            <dl class="kv" id="trendDetail"></dl>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="grid c2">
+      <div class="card">
+        <div class="card-head"><div><h3>Ideas for this symbol</h3></div></div>
+        <div id="symIdeas"></div>
+      </div>
+      <div class="card">
+        <div class="card-head"><div><h3>News</h3></div></div>
+        <div id="symNews" class="news-list"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================================================================ CHAIN -->
+  <section class="view" id="view-chain">
+    <div class="card">
+      <div class="row tight">
+        <span class="field">Symbol <select id="chainSym"></select></span>
+        <span class="field">Expiry <select id="chainExp"></select></span>
+        <span class="field">Strikes <select id="chainRange">
+          <option value="0.06">&plusmn;6%</option>
+          <option value="0.12" selected>&plusmn;12%</option>
+          <option value="0.25">&plusmn;25%</option>
+          <option value="9">all</option></select></span>
+        <span class="field">Columns <select id="chainCols">
+          <option value="core" selected>core</option>
+          <option value="greeks">all greeks</option>
+          <option value="flow">volume &amp; flow</option>
+        </select></span>
+        <span class="muted" id="chainMeta" style="margin-left:auto;font-size:11.5px"></span>
+      </div>
+      <div class="tiles" id="chainTiles"></div>
+    </div>
+    <div class="card">
+      <p class="hint">
+        Calls left, puts right. <b>IV is the fitted surface value</b>, so greeks are mutually
+        consistent across the whole strip — a book's aggregate delta means nothing when each leg is
+        marked on its own noisy vol. The raw vendor quotes are plotted against the fit in the symbol
+        view's smile chart. Shaded cells are in the money.
+      </p>
+      <div class="chain-wrap"><table class="chain" id="chainTable"></table></div>
+    </div>
+  </section>
+
+  <!-- ================================================================= FLOW -->
+  <section class="view" id="view-flow">
+    <div class="card">
+      <div class="card-head">
+        <div>
+          <h3>Options volume leaders</h3>
+          <p class="hint">Premium traded = contract volume &times; mid &times; 100. Relative volume
+            compares today against this desk's own trailing average for the same name, so it needs a
+            few days of history before it reads.</p>
+        </div>
+      </div>
+      <div class="table-wrap"><table class="data-table" id="flowLeaders"></table></div>
+    </div>
+    <div class="card"><div id="chartCallPut"></div></div>
+    <div class="card">
+      <div class="card-head">
+        <div>
+          <h3>Unusual options activity</h3>
+          <p class="hint">Contracts where today's volume dwarfs existing open interest — most prints
+            must therefore be <em>opening</em> trades, so somebody is building a position rather than
+            closing one. Filtered to at least $25k of premium. <b>Side</b> is where the last print
+            landed inside the spread, and is only shown when that print happened in this session.</p>
+        </div>
+      </div>
+      <div class="table-wrap"><table class="data-table" id="flowUnusual"></table></div>
+    </div>
+  </section>
+
+  <!-- ============================================================== JOURNAL -->
+  <section class="view" id="view-journal">
+    <div class="card">
+      <div class="tiles" id="journalTiles"></div>
+    </div>
+    <div class="card">
+      <div class="card-head">
+        <div><h3>Positions</h3></div>
+        <div class="row" style="margin:0">
+          <span class="field">Show <select id="tradeStatus">
+            <option value="all">all</option><option value="open">open</option>
+            <option value="closed">closed</option></select></span>
+        </div>
+      </div>
+      <div class="table-wrap"><table class="data-table" id="tradeTable"></table></div>
+    </div>
+    <div class="grid c2">
+      <div class="card"><div id="chartEquity"></div></div>
+      <div class="card"><div id="chartByStrategy"></div></div>
+    </div>
+    <div class="card">
+      <div class="card-head">
+        <div>
+          <h3>Scanner forward test</h3>
+          <p class="hint">Every idea the scanner has emitted is marked daily whether or not it was
+            taken, written before the outcome is known and never revised. Calibration compares the
+            stated probability of profit against how often those ideas were actually in profit — the
+            honest check on whether the model's confidence is earned.</p>
+        </div>
+      </div>
+      <div class="grid c2">
+        <div><div id="chartCalibration"></div></div>
+        <div class="table-wrap"><table class="data-table" id="scannerTable"></table></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================================================================ TOOLS -->
+  <section class="view" id="view-tools">
+    <div class="grid c2">
+      <div class="card">
+        <div class="card-head">
+          <div>
+            <h3>Option calculator</h3>
+            <p class="hint">Black–Scholes with a continuous dividend yield. Enter a market price and
+              press <b>Solve IV</b> to invert instead.</p>
+          </div>
+        </div>
+        <div class="grid c3" style="gap:10px">
+          <span class="field" style="flex-direction:column;align-items:stretch">Spot<input type="number" id="cSpot" value="100" step="0.01"></span>
+          <span class="field" style="flex-direction:column;align-items:stretch">Strike<input type="number" id="cStrike" value="100" step="0.01"></span>
+          <span class="field" style="flex-direction:column;align-items:stretch">Days to expiry<input type="number" id="cDays" value="30" step="1"></span>
+          <span class="field" style="flex-direction:column;align-items:stretch">IV %<input type="number" id="cIv" value="30" step="0.1"></span>
+          <span class="field" style="flex-direction:column;align-items:stretch">Rate %<input type="number" id="cRate" value="4.25" step="0.01"></span>
+          <span class="field" style="flex-direction:column;align-items:stretch">Dividend %<input type="number" id="cDiv" value="0" step="0.01"></span>
+          <span class="field" style="flex-direction:column;align-items:stretch">Right<select id="cRight"><option value="C">Call</option><option value="P">Put</option></select></span>
+          <span class="field" style="flex-direction:column;align-items:stretch">Market price<input type="number" id="cPrice" step="0.01" placeholder="for solve"></span>
+        </div>
+        <div class="row" style="margin:14px 0 0">
+          <button class="btn primary" id="cCalc">Calculate</button>
+          <button class="btn" id="cSolve">Solve IV from price</button>
+          <button class="btn" id="cLoad">Load from selected symbol</button>
+        </div>
+        <div class="tiles" id="calcOut" style="margin-top:14px"></div>
+      </div>
+      <div class="card">
+        <div class="card-head"><div><h3>System status</h3></div></div>
+        <dl class="kv" id="statusKv"></dl>
+        <div class="row" style="margin-top:16px">
+          <button class="btn" id="fullRefresh">Run full pipeline</button>
+          <button class="btn" id="fullRefreshFresh">Run ignoring cache</button>
+        </div>
+        <p class="hint" style="margin-top:12px">A full run fetches every watchlist name and takes a
+          couple of minutes. The page keeps serving the previous snapshot while it works.</p>
+      </div>
+    </div>
+  </section>
+</main>
+
+<script src="/static/charts.js"></script>
+<script src="/static/app.js"></script>
+</body>
+</html>

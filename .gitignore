@@ -1,0 +1,43 @@
+# ---------------------------------------------------------------------------
+# Theta Desk
+#
+# Everything under data/ is either a secret, a cache, or a rebuildable
+# artefact.  The database alone is ~250 MB of churning binary and holds the
+# trade journal; the HTTP cache is another ~75 MB.  Both are reconstructed by
+# `python pipeline.py`, so neither belongs in version control.
+# ---------------------------------------------------------------------------
+
+# Secrets -- password hash, session signing key, generated plaintext
+data/auth.json
+data/auth.json.tmp
+data/INITIAL_PASSWORD.txt
+.env
+
+# Data, caches and logs (all rebuildable)
+data/
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Editors / OS
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+Thumbs.db
+desktop.ini
