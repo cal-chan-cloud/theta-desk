@@ -13,6 +13,10 @@ data/auth.json.tmp
 data/INITIAL_PASSWORD.txt
 .env
 
+# Personal settings: account size, risk appetite, your own watchlist.
+# config.py imports this last, so it overrides the published defaults.
+config_local.py
+
 # Data, caches and logs (all rebuildable)
 data/
 *.db

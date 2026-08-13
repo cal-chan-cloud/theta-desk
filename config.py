@@ -163,8 +163,11 @@ SCAN_MAX_PER_TICKER = 3
 COMMISSION_PER_CONTRACT = 0.65   # used in EV; set to 0 if your broker is free
 SLIPPAGE_FRAC_OF_SPREAD = 0.25   # assume you pay a quarter of the spread
 
-# Account sizing for the suggested contract count
-ACCOUNT_SIZE = 25000.0
+# Account sizing for the suggested contract count.
+# These are DEFAULTS. Put your real numbers in config_local.py (gitignored) --
+# see config_local.example.py. Position sizing and the affordability component
+# of the idea score both read these, so they change what the board recommends.
+ACCOUNT_SIZE = 10000.0
 RISK_PER_TRADE_PCT = 0.02        # 2% of account at risk per idea
 
 # Exit policy (drives the take-profit ladder)
@@ -239,3 +242,15 @@ ARCHIVE_MIN_OI = 250             # archived contracts must be genuinely traded
 ARCHIVE_MAX_MONEYNESS = 0.12     # |ln(K/spot)| -- the wings are not worth keeping
 NEWS_RETENTION_DAYS = 120
 VACUUM_ABOVE_BYTES = 500 * 1024 * 1024
+
+# --------------------------------------------------------------------------
+# Local overrides -- MUST stay last so it wins over everything above.
+#
+# config_local.py is gitignored. It is where personal settings live (account
+# size, risk appetite, your own watchlist) so this file can be published
+# without publishing them. Copy config_local.example.py to get started.
+# --------------------------------------------------------------------------
+try:
+    from config_local import *          # noqa: F401,F403
+except ImportError:
+    pass

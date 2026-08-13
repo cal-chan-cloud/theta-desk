@@ -65,6 +65,24 @@ Two things worth being clear about:
 
 To remove the gate: `python set_password.py --clear`.
 
+**The repository is public; your instance is not.** Nothing secret is in here —
+no API keys (there are none to have), no database, no credentials. The password
+hash, the session signing key and your personal settings all live in gitignored
+files on your own machine.
+
+## Personal settings
+
+`config.py` holds published **defaults**. Your own numbers go in
+`config_local.py`, which is gitignored and imported last so it wins:
+
+```bat
+copy config_local.example.py config_local.py
+```
+
+Account size and risk-per-trade are the ones worth setting first — they drive
+position sizing *and* the affordability component of the idea score, so they
+change which trades reach the top of the board.
+
 Verify the model at any time:
 
 ```bat
