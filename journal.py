@@ -261,6 +261,12 @@ def mark_ideas(rolls, today=None, lookback_days=120):
 
 
 # ------------------------------------------------------------- performance
+# A position is treated as resolved for calibration once it is within this many
+# days of expiry -- by then the mark and the settled outcome have converged.
+CALIB_DTE_LEFT = 3
+CALIB_MIN_PER_BUCKET = 5
+
+
 def _stats(pnls):
     if not pnls:
         return {"n": 0, "win_rate": None, "avg_win": None, "avg_loss": None,
@@ -345,6 +351,8 @@ def idea_performance(days=90):
     """How the scanner's own suggestions have played out."""
     rows = db.q("""SELECT i.id, i.asof_date, i.symbol, i.strategy, i.score, i.dte,
                           i.entry_price, i.pop, i.ev, i.max_profit, i.max_loss,
+                          i.expiry,
+                          julianday(i.expiry) - julianday('now') AS dte_left,
                           o.asof_date AS mark_date, o.pnl, o.pnl_pct, o.hit_target
                      FROM idea i
                      JOIN idea_outcome o ON o.idea_id = i.id
@@ -354,7 +362,7 @@ def idea_performance(days=90):
                 ("-%d day" % days,))
     if not rows:
         return {"n": 0, "buckets": {}, "by_strategy": {}, "overall": _stats([]),
-                "calibration": []}
+                "calibration": [], "resolved": 0, "open": 0, "calibration_note": None}
 
     overall = _stats([r["pnl"] for r in rows if r["pnl"] is not None])
     by_strategy, buckets = {}, {}
@@ -365,19 +373,45 @@ def idea_performance(days=90):
         b = "%d-%d" % (int(r["score"] // 5) * 5, int(r["score"] // 5) * 5 + 5)
         buckets.setdefault(b, []).append(r["pnl"])
 
-    # Is the model's stated POP honest?  Compare predicted vs realised.
+    # Is the model's stated POP honest?
+    #
+    # POP is the probability of being profitable AT EXPIRY.  Comparing it with
+    # whether a position happens to be green at a mid-life mark measures a
+    # different question entirely: a 30-DTE bull put spread at 85% POP is
+    # *supposed* to sit underwater when the stock dips early, and it still has
+    # a month to be right.  Scoring that as a calibration miss made the model
+    # look badly overconfident when nothing had actually resolved -- with 100
+    # ideas on the board and zero past expiry, the old chart was drawing a
+    # verdict out of pure noise.
+    #
+    # So calibration is computed ONLY from ideas that have reached expiry (or
+    # are inside the final few days, where the mark and the outcome converge).
+    # Everything still running is reported separately as open exposure.
+    resolved = [r for r in rows if (r["dte_left"] is not None and r["dte_left"] <= CALIB_DTE_LEFT
+                                    and r["pnl"] is not None)]
+    still_open = [r for r in rows if r not in resolved]
+
     calib = []
     for lo in range(20, 100, 10):
-        grp = [r for r in rows if r["pop"] is not None and lo <= r["pop"] * 100 < lo + 10
-               and r["pnl"] is not None]
-        if len(grp) >= 3:
+        grp = [r for r in resolved if r["pop"] is not None and lo <= r["pop"] * 100 < lo + 10]
+        if len(grp) >= CALIB_MIN_PER_BUCKET:
             calib.append({
                 "predicted": lo + 5,
                 "realised": 100.0 * sum(1 for r in grp if r["pnl"] > 0) / len(grp),
                 "n": len(grp),
             })
+    note = None
+    if not calib:
+        note = ("No idea has reached expiry yet (%d still running, nearest resolves in "
+                "%.0f days). Probability of profit is an expiry statistic, so calibration "
+                "stays empty until positions actually resolve." %
+                (len(still_open),
+                 min((r["dte_left"] for r in rows if r["dte_left"] is not None), default=0)))
     return {
         "n": len(rows),
+        "resolved": len(resolved),
+        "open": len(still_open),
+        "calibration_note": note,
         "overall": overall,
         "by_strategy": {k: _stats(v) for k, v in by_strategy.items()},
         "buckets": {k: _stats(v) for k, v in sorted(buckets.items())},

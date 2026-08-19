@@ -176,6 +176,7 @@ CREATE TABLE IF NOT EXISTS symbol_metrics (
     jump_share    REAL,
     skew_25       REAL,
     regime        TEXT, vol_regime TEXT, trend_regime TEXT, vol_edge REAL,
+    vol_edge_pctile REAL,
     opt_volume    REAL, opt_oi REAL, opt_dollar_volume REAL,
     opt_rvol      REAL,               -- options volume vs its own 20d average
     pcr_vol REAL, pcr_oi REAL,

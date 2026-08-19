@@ -192,7 +192,9 @@ def process_symbol(symbol, curve, macro, bench_bars, news_agg, earnings_rows,
 
     iv30 = roll["iv30"] or ch.get("iv30_source")
     ivh = iv_history(symbol)
-    iv_rk = vol.rank_and_percentile(iv30, ivh)
+    # IV rank needs a real sample before it means anything; HV rank is built
+    # from two years of price history and is meaningful from day one.
+    iv_rk = vol.rank_and_percentile(iv30, ivh, min_samples=config.IV_RANK_MIN_SAMPLES)
     hvh = hv_series(complete)
     hv_rk = vol.rank_and_percentile(rv.get("hv20"), hvh)
 
@@ -448,15 +450,18 @@ def run(symbols=None, fresh=False, do_news=True, do_ideas=True, quiet=False):
                                      ttl=0 if fresh else None)
         store_bars(config.BENCHMARK, bench)
 
-        all_ideas, rolls = [], {}
+        # PASS 1 -- metrics only.  Ideas are deferred until every symbol has been
+        # measured, because the vol regime is now decided cross-sectionally and
+        # a name's percentile cannot be known before its peers exist.
+        all_ideas, rolls, metrics_by_sym = [], {}, {}
         for i, sym in enumerate(symbols, 1):
             t1 = time.time()
             try:
                 m, ideas, roll = process_symbol(
                     sym, curve, macro, bench, news_agg.get(sym), earnings_map.get(sym),
-                    fresh=fresh, make_ideas=do_ideas)
+                    fresh=fresh, make_ideas=False)
                 rolls[sym] = roll
-                all_ideas.extend(ideas)
+                metrics_by_sym[sym] = (m, roll)
                 stats["symbols"] += 1
                 stats["contracts"] += roll["n_contracts"]
                 if not quiet:
@@ -471,6 +476,35 @@ def run(symbols=None, fresh=False, do_news=True, do_ideas=True, quiet=False):
                 log("  %2d/%d %-6s FAILED: %s", i, len(symbols), sym, e)
                 if "--debug" in sys.argv:
                     traceback.print_exc()
+
+        # PASS 2 -- rank each name's vol edge against its peers, then build.
+        edges = sorted((m.get("vol_edge") for m, _r in metrics_by_sym.values()
+                        if m.get("vol_edge") is not None))
+        if do_ideas and edges:
+            for sym, (m, roll) in metrics_by_sym.items():
+                e = m.get("vol_edge")
+                if e is not None and len(edges) > 4:
+                    below = sum(1 for x in edges if x < e)
+                    m["vol_edge_pctile"] = 100.0 * below / len(edges)
+                    # Re-classify with the peer group now known, and WRITE IT
+                    # BACK.  Pass 1 had no cross-section, so its label came from
+                    # the absolute fallback; leaving that stored would show the
+                    # dashboard one regime while the scanner traded another.
+                    vr2 = scanner.vol_regime(m.get("iv30"), m.get("vol_forecast"),
+                                             m.get("iv_rank"), pctile=m["vol_edge_pctile"])
+                    m["vol_regime"] = vr2["label"]
+                    m["regime"] = "%s / IV %s" % (m.get("trend_regime"), vr2["label"])
+                    db.execute("""UPDATE symbol_metrics
+                                     SET vol_edge_pctile=?, vol_regime=?, regime=?
+                                   WHERE symbol=? AND ts=?""",
+                               (m["vol_edge_pctile"], m["vol_regime"], m["regime"],
+                                sym, m["ts"]))
+                try:
+                    all_ideas.extend(scanner.build_ideas(sym, roll, m, now=marketcal.now_utc()))
+                except Exception as e:                     # noqa: BLE001
+                    log("  ideas %s failed: %s", sym, e)
+            log("cross-section: vol edge from %.0f%% to %.0f%% across %d names",
+                edges[0] * 100, edges[-1] * 100, len(edges))
 
         ranked = scanner.rank_all(all_ideas)
         stats["ideas"] = persist_ideas(ranked)

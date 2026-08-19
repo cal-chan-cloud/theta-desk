@@ -122,6 +122,35 @@ VOL_MEAN_REVERSION_30D = 0.35
 TYPICAL_VRP_RATIO = 1.12
 
 # --------------------------------------------------------------------------
+# Vol-forecast recalibration.  MEASURED, not assumed.
+#
+# A walk-forward backtest over 2 years x 35 names (2,660 forecast/outcome
+# pairs, forecast computed from strictly prior data) found the blend
+# systematically UNDER-forecasts realised vol: median predicted/actual 0.876.
+# That is not harmless.  sigma_p sets the width of the P-measure density, so a
+# forecast that is 12% too low makes every short-premium structure look safer
+# than it is -- inflating POP, understating CVaR, and flattering exactly the
+# iron condors and short strangles the scanner likes to rank first.
+#
+# The irony is that the bias comes from the jump-robust machinery added to fix
+# the AAPL earnings-gap problem: winsorising and bipower strip out real
+# volatility that does recur, not just the stale gap.  Plain Yang-Zhang is
+# nearly unbiased (1.012) but has 3% worse RMSE; the blend wins on variance and
+# loses on bias, so the fix is to keep the blend and correct the level.
+#
+# Mincer-Zarnowitz calibration  log(actual) = A + B*log(forecast), fitted on the
+# FIRST half of the sample and validated on the second half it never saw:
+#     median predicted/actual   0.869 -> 0.994
+#     mean bias                -0.0765 -> -0.0289
+#     RMSE                      0.1609 -> 0.1394   (13% better)
+# B is 0.994, i.e. essentially 1, so this is close to a flat 1.135x scale --
+# the apparent regime slope in the raw diagnostics is mostly an artefact of
+# conditioning on the realised outcome.  Set VOL_CALIBRATION = False to disable.
+VOL_CALIBRATION = True
+VOL_CALIB_A = 0.1268
+VOL_CALIB_B = 0.9942
+
+# --------------------------------------------------------------------------
 # Trend model -- weights of the composite trend score (sum of |w| = 1.0)
 # --------------------------------------------------------------------------
 TREND_WEIGHTS = {
@@ -159,6 +188,32 @@ SCAN_MIN_DTE = 7
 SCAN_MAX_DTE = 75
 SCAN_PREFERRED_DTE = (25, 50)
 SCAN_TOP_N = 25                  # ideas surfaced per day
+
+# --------------------------------------------------------------------------
+# Portfolio construction.  Individual scores are blind to the shape of the
+# whole board: nothing stopped 2026-08-13..19 running 15-20 bullish of 25 at
+# once, and most of that week's loss was that single aggregate bet rather than
+# bad individual trades.  These caps are applied AFTER ranking, so the best
+# idea in a crowded bucket still survives -- the marginal fifth copy does not.
+BOARD_MAX_BULLISH_PCT = 0.55     # share of the board allowed to be long delta
+BOARD_MAX_BEARISH_PCT = 0.55
+BOARD_MAX_PER_GROUP = 5          # ideas per correlated group (see GROUPS)
+BOARD_MAX_PER_SYMBOL = 2         # down from 3: one name, one thesis
+BOARD_ENFORCE = True
+
+# Names that rise and fall together.  Four "independent" ideas on SPY, QQQ, IWM
+# and DIA are one index bet with four tickets; the same is true across the
+# semis.  Anything unlisted is its own group.
+CORRELATION_GROUPS = {
+    "index":  ["SPY", "QQQ", "IWM", "DIA"],
+    "semis":  ["NVDA", "AMD", "SMH", "MU", "AVGO", "SMCI"],
+    "megacap": ["AAPL", "MSFT", "AMZN", "GOOGL", "META"],
+    "crypto": ["COIN", "MSTR"],
+    "metals": ["GLD", "SLV"],
+    "energy": ["XOM", "OXY", "XLE"],
+    "banks":  ["JPM", "GS", "XLF"],
+    "rates":  ["TLT"],
+}
 SCAN_MAX_PER_TICKER = 3
 COMMISSION_PER_CONTRACT = 0.65   # used in EV; set to 0 if your broker is free
 SLIPPAGE_FRAC_OF_SPREAD = 0.25   # assume you pay a quarter of the spread
@@ -185,6 +240,19 @@ EARNINGS_BLACKOUT_DAYS = 2       # avoid holding short vega through a print
 # `sizing` exists because a beautiful trade you cannot put on at a sane size is
 # not a trade: on a $968 underlying a single long call risked $4,280 against a
 # $500 per-trade budget and still ranked first on expectancy alone.
+# How hard the real-world drift is allowed to lean on the trend score.
+#
+# Was 0.35 (a ~0.35 Sharpe tilt).  On a 40%-vol name that is r + 14% annualised
+# drift, which materially inflates the expectancy of every long-delta structure
+# -- and the boards from 2026-08-13..19 ran 15-20 bullish of 25 into a falling
+# tape and lost most of their money to that skew.  Trend predicting 30-day
+# returns is a weak effect at best (short-term reversal competes with it), and
+# the scanner's own forward test has not yet shown the trend score predicts
+# anything (r = +0.05 on 75 marks).  Shrunk hard until that evidence exists;
+# the directional view still reaches the score through IDEA_WEIGHTS["trend"].
+DRIFT_TILT_SHARPE = 0.10
+DRIFT_NEWS_WEIGHT = 0.04
+
 IDEA_WEIGHTS = {
     "edge": 0.27,        # model EV per dollar risked
     "vol_edge": 0.18,    # implied vs forecast vol mismatch

@@ -638,6 +638,65 @@ def test_sentiment():
 
 
 # ==================================================================== scanner
+def test_vol_calibration():
+    section("vol-forecast calibration")
+    check("calibration is on by default", config.VOL_CALIBRATION)
+    # It must RAISE the forecast: the measured bias was 12% low.
+    raised = [vol.calibrate(f) > f for f in (0.10, 0.20, 0.35, 0.60, 1.00)]
+    check("calibration raises the forecast at every level", all(raised))
+    check("correction is close to a flat 1.135x (fitted B ~ 1)",
+          all(abs(vol.calibrate(f) / f - 1.135) < 0.02 for f in (0.15, 0.30, 0.60)),
+          "%s" % [round(vol.calibrate(f) / f, 4) for f in (0.15, 0.30, 0.60)])
+    check("calibration is monotone", vol.calibrate(0.2) < vol.calibrate(0.4) < vol.calibrate(0.8))
+    check("calibration stays inside the IV bounds",
+          config.MIN_IV <= vol.calibrate(0.01) and vol.calibrate(4.9) <= config.MAX_IV)
+    check("calibration is a no-op on junk input",
+          vol.calibrate(0) in (0, None) and vol.calibrate(None) is None)
+    # forecast_vol must route through it
+    bars = [{"date": "d%03d" % i, "open": 100, "high": 101, "low": 99,
+             "close": 100 * (1.004 if i % 2 else 0.996), "volume": 1e6} for i in range(300)]
+    rv = vol.all_realised(bars)
+    fc = vol.forecast_vol(rv)
+    raw_blend = sum(config.VOL_FORECAST_WEIGHTS[k] * rv[k]
+                    for k in config.VOL_FORECAST_WEIGHTS if rv.get(k)) /         sum(config.VOL_FORECAST_WEIGHTS[k] for k in config.VOL_FORECAST_WEIGHTS if rv.get(k))
+    check("forecast_vol applies the calibration", fc > raw_blend * 1.05,
+          "fc=%.4f vs raw blend %.4f" % (fc, raw_blend))
+
+
+def test_board_construction():
+    section("portfolio construction")
+    mk = lambda s, d, sc: {"symbol": s, "direction": d, "score": sc, "strategy": "x"}
+    ideas = ([mk("SPY", "bullish", 99 - i) for i in range(6)] +
+             [mk("NVDA", "bullish", 90 - i) for i in range(6)] +
+             [mk("TLT", "bearish", 80), mk("GLD", "neutral", 79),
+              mk("XOM", "neutral", 78), mk("UBER", "volatility", 77)])
+    out = scanner.rank_all(ideas, top_n=12)
+    bull = sum(1 for i in out if i["direction"] == "bullish")
+    check("bullish share is capped", bull <= int(12 * config.BOARD_MAX_BULLISH_PCT),
+          "%d bullish of %d kept" % (bull, len(out)))
+    per_sym = {}
+    for i in out:
+        per_sym[i["symbol"]] = per_sym.get(i["symbol"], 0) + 1
+    check("per-symbol cap holds", max(per_sym.values()) <= config.BOARD_MAX_PER_SYMBOL,
+          "%s" % per_sym)
+    per_grp = {}
+    for i in out:
+        g = scanner.GROUP_OF.get(i["symbol"], i["symbol"])
+        per_grp[g] = per_grp.get(g, 0) + 1
+    check("correlation-group cap holds", max(per_grp.values()) <= config.BOARD_MAX_PER_GROUP,
+          "%s" % per_grp)
+    check("ranks are contiguous from 1",
+          [i["rank"] for i in out] == list(range(1, len(out) + 1)))
+    check("the top idea always survives", out and out[0]["score"] == 99)
+    check("dropped ideas record why",
+          all(i.get("excluded_reason") for i in ideas if i not in out))
+    check("SPY and QQQ share a correlation group",
+          scanner.GROUP_OF.get("SPY") == scanner.GROUP_OF.get("QQQ") == "index")
+
+    check("drift tilt is shrunk from the original 0.35",
+          config.DRIFT_TILT_SHARPE <= 0.15, "%.2f" % config.DRIFT_TILT_SHARPE)
+
+
 def test_scanner():
     section("scanner regimes")
     check("high IV vs forecast reads rich",
@@ -917,6 +976,8 @@ def main():
     test_calendar()
     test_technicals()
     test_sentiment()
+    test_vol_calibration()
+    test_board_construction()
     test_scanner()
     test_db()
     if live:

@@ -17,21 +17,60 @@ from . import bs, strategies, vol as volmod
 
 
 # ------------------------------------------------------------------ regimes
-def vol_regime(iv30, forecast, iv_rank):
-    """Rich / fair / cheap, from the implied-vs-forecast gap and IV rank."""
+def vol_regime(iv30, forecast, iv_rank, pctile=None):
+    """Rich / fair / cheap, measured against the NORMAL variance risk premium.
+
+    Implied vol exceeding forecast realised vol is not an edge -- it is the
+    resting state of the options market.  Sellers are paid a premium for
+    carrying variance risk, historically around 12% for liquid US equity
+    underlyings (config.TYPICAL_VRP_RATIO).  A name where IV sits exactly that
+    far above forecast is *fairly* priced, not rich.
+
+    This matters more since the forecast was recalibrated.  The old thresholds
+    were tuned against a forecast biased 12% low, so they had the typical
+    premium silently baked in; correcting the forecast without re-centring the
+    thresholds flipped the whole board from 68% credit to 68% debit on one
+    constant -- top ideas became 27%-POP long calls overnight.  Comparing the
+    excess over the normal premium makes the classification invariant to the
+    level of the forecast, which is what it should always have been.
+    """
     edge = None
     if iv30 and forecast and forecast > 0:
         edge = (iv30 - forecast) / forecast
     votes = 0
     if edge is not None:
-        if edge > 0.18:
-            votes += 2
-        elif edge > 0.06:
-            votes += 1
-        elif edge < -0.10:
-            votes -= 2
-        elif edge < -0.02:
-            votes -= 1
+        excess = edge - (config.TYPICAL_VRP_RATIO - 1.0)
+        # CROSS-SECTIONAL first, absolute only as a fallback.
+        #
+        # Absolute thresholds are fragile to anything that moves the whole
+        # cross-section at once.  Recalibrating the vol forecast upward by 13.5%
+        # -- a change that is right on its own terms and improved forecast RMSE
+        # by 13% -- shifted every name's edge down together and flipped the board
+        # from 68% credit to 88% debit, with 27%-POP long calls at the top.  That
+        # is a threshold artefact, not a view.
+        #
+        # Percentile within today's watchlist is immune to it: a name is rich
+        # because its premium is rich *relative to what else is on offer today*,
+        # which is how relative value actually works, and it guarantees the board
+        # cannot become a single one-way bet just because a constant moved.
+        if pctile is not None:
+            if pctile >= 80:
+                votes += 2
+            elif pctile >= 62:
+                votes += 1
+            elif pctile <= 20:
+                votes -= 2
+            elif pctile <= 38:
+                votes -= 1
+        else:
+            if excess > 0.12:
+                votes += 2
+            elif excess > 0.04:
+                votes += 1
+            elif excess < -0.14:
+                votes -= 2
+            elif excess < -0.05:
+                votes -= 1
     if iv_rank is not None:
         if iv_rank > 70:
             votes += 1
@@ -43,7 +82,8 @@ def vol_regime(iv30, forecast, iv_rank):
         label = "cheap"
     else:
         label = "fair"
-    return {"label": label, "edge": edge, "votes": votes}
+    return {"label": label, "edge": edge, "votes": votes, "pctile": pctile,
+            "excess": (edge - (config.TYPICAL_VRP_RATIO - 1.0)) if edge is not None else None}
 
 
 def trend_regime(trend_score):
@@ -116,7 +156,8 @@ def build_ideas(symbol, roll, metrics, now=None, max_per_symbol=None):
 
     forecast = metrics.get("vol_forecast")
     iv30 = metrics.get("iv30") or roll.get("iv30")
-    vr = vol_regime(iv30, forecast, metrics.get("iv_rank"))
+    vr = vol_regime(iv30, forecast, metrics.get("iv_rank"),
+                    pctile=metrics.get("vol_edge_pctile"))
     tr = trend_regime(metrics.get("trend_score"))
     earnings_date = marketcal.parse_date(metrics["earnings_date"]) if metrics.get("earnings_date") else None
     dte_earn = metrics.get("days_to_earnings")
@@ -141,11 +182,16 @@ def build_ideas(symbol, roll, metrics, now=None, max_per_symbol=None):
             break
     trend_score = metrics.get("trend_score") or 0.0
     news_score = metrics.get("news_score") or 0.0
-    # A deliberately modest tilt: trend and news together move the drift by at
-    # most a ~0.3 Sharpe.  Anything larger and the EV ranking becomes a
-    # momentum bet wearing an options costume.
-    tilt = 0.25 * trend_score + 0.08 * news_score
-    tilt = max(min(tilt, 0.35), -0.35)
+    # The drift tilt is an ALPHA CLAIM: any deviation from the risk-neutral
+    # r - q says we know which way the stock goes.  It also used to be counted
+    # twice -- once here (tilting the density, which raises EV, which feeds
+    # comp["edge"]) and again as comp["trend"].  A bullish name therefore got
+    # paid for its trend in two separate score components, which is a large
+    # part of why boards ran 15-20 bullish of 25.  The tilt is now shrunk hard
+    # and the directional view is carried by comp["trend"] alone.
+    tilt = config.DRIFT_TILT_SHARPE * trend_score + config.DRIFT_NEWS_WEIGHT * news_score
+    lim = config.DRIFT_TILT_SHARPE + config.DRIFT_NEWS_WEIGHT
+    tilt = max(min(tilt, lim), -lim)
 
     today = marketcal.session_date()
     expiries = pick_expiries(roll["expiries"], earnings_date)
@@ -229,11 +275,17 @@ def score_idea(pos, exp, roll, metrics, dens_q, dens_p, vr, tr, sigma_p, drift_p
 
     # ---- component scores, each in [-1, 1] -------------------------------
     comp = {}
+    # Expectancy per dollar of risk.  With the drift tilt shrunk, this is now
+    # close to a pure *volatility* edge -- how much the structure is worth when
+    # the market's own density is re-scaled to our forecast of realised vol --
+    # rather than a directional bet wearing an expectancy costume.
     comp["edge"] = _norm(ev_per_risk, 0.12)
 
     # Does the structure's vega sign agree with the vol read?
     vega_sign = 1.0 if g["vega"] > 0 else (-1.0 if g["vega"] < 0 else 0.0)
-    edge_pct = vr["edge"] if vr["edge"] is not None else 0.0
+    # Excess over the normal variance premium, for the same reason: being paid
+    # the going rate for variance is not an edge in either direction.
+    edge_pct = vr.get("excess") if vr.get("excess") is not None else 0.0
     comp["vol_edge"] = _norm(-vega_sign * edge_pct, 0.20)
 
     # Does the structure's delta sign agree with the trend?
@@ -395,9 +447,67 @@ def _warnings(pos, exp, metrics):
     return out
 
 
+GROUP_OF = {}
+for _g, _syms in getattr(config, "CORRELATION_GROUPS", {}).items():
+    for _s in _syms:
+        GROUP_OF[_s] = _g
+
+
 def rank_all(all_ideas, top_n=None):
+    """Rank, then shape the BOARD -- not just the individual ideas.
+
+    Per-idea scoring cannot see that it has produced twenty bullish trades, or
+    five versions of the same index bet.  This pass walks the ranked list and
+    skips an idea once its bucket is full, so the best idea in a crowded bucket
+    always survives and only the marginal duplicate is dropped.  Every skip is
+    recorded on the idea so the reason is visible rather than mysterious.
+    """
     top_n = top_n or config.SCAN_TOP_N
     ideas = sorted(all_ideas, key=lambda i: -i["score"])
-    for i, idea in enumerate(ideas, 1):
-        idea["rank"] = i
-    return ideas[:top_n]
+    if not getattr(config, "BOARD_ENFORCE", False):
+        for n, idea in enumerate(ideas, 1):
+            idea["rank"] = n
+        return ideas[:top_n]
+
+    max_bull = int(top_n * config.BOARD_MAX_BULLISH_PCT)
+    max_bear = int(top_n * config.BOARD_MAX_BEARISH_PCT)
+    kept, dropped = [], []
+    n_bull = n_bear = 0
+    per_group, per_sym = {}, {}
+
+    for idea in ideas:
+        if len(kept) >= top_n:
+            break
+        sym = idea["symbol"]
+        grp = GROUP_OF.get(sym, sym)
+        d = idea.get("direction")
+        reason = None
+        if d == "bullish" and n_bull >= max_bull:
+            reason = "board already %d%% long delta" % int(config.BOARD_MAX_BULLISH_PCT * 100)
+        elif d == "bearish" and n_bear >= max_bear:
+            reason = "board already %d%% short delta" % int(config.BOARD_MAX_BEARISH_PCT * 100)
+        elif per_sym.get(sym, 0) >= config.BOARD_MAX_PER_SYMBOL:
+            reason = "%d ideas already on %s" % (config.BOARD_MAX_PER_SYMBOL, sym)
+        elif per_group.get(grp, 0) >= config.BOARD_MAX_PER_GROUP:
+            reason = "%d ideas already in the '%s' group" % (config.BOARD_MAX_PER_GROUP, grp)
+        if reason:
+            idea["excluded_reason"] = reason
+            dropped.append(idea)
+            continue
+        per_sym[sym] = per_sym.get(sym, 0) + 1
+        per_group[grp] = per_group.get(grp, 0) + 1
+        if d == "bullish":
+            n_bull += 1
+        elif d == "bearish":
+            n_bear += 1
+        idea["group"] = grp
+        kept.append(idea)
+
+    for n, idea in enumerate(kept, 1):
+        idea["rank"] = n
+    if dropped:
+        kept_syms = {i["symbol"] for i in kept}
+        for i in kept:
+            i["board_note"] = ("%d higher-scoring ideas were held back by board limits"
+                               % len(dropped)) if len(dropped) else None
+    return kept

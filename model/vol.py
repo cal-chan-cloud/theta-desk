@@ -557,7 +557,21 @@ def forecast_vol(realised, horizon_days=30):
         return short
     pull = config.VOL_MEAN_REVERSION_30D * min(horizon_days / 30.0, 2.0)
     pull = min(max(pull, 0.0), 0.85)
-    return (1 - pull) * short + pull * anchor
+    blended = (1 - pull) * short + pull * anchor
+    return calibrate(blended)
+
+
+def calibrate(fc):
+    """Correct the blend's measured downward bias.  See config for the study.
+
+    Applied at the single point every consumer goes through, so vol_edge, the
+    P-density width, POP, CVaR and every target probability all move together
+    rather than drifting out of agreement.
+    """
+    if not fc or fc <= 0 or not getattr(config, "VOL_CALIBRATION", False):
+        return fc
+    out = math.exp(config.VOL_CALIB_A + config.VOL_CALIB_B * math.log(fc))
+    return min(max(out, config.MIN_IV), config.MAX_IV)
 
 
 def add_event_jump(diffusive, jump_move, t_years):
@@ -608,15 +622,21 @@ def implied_event_move(per_expiry, event_date):
 
 
 # ============================================================ RANK / PERCENTILE
-def rank_and_percentile(current, history):
+def rank_and_percentile(current, history, min_samples=3):
     """IV rank = position in the [min,max] range; IV percentile = % of days below.
 
     Both are reported because they disagree in exactly the situations that
     matter: after one vol spike, rank collapses toward 0 while percentile can
     still read 80.  Rank is the popular one; percentile is the robust one.
+
+    `min_samples` guards against publishing a confident-looking rank off a
+    handful of observations.  With four sessions on record, "rank 100" only
+    means today was the highest of four -- roughly a coin flip -- yet it reads
+    like a screaming vol extreme.  Callers with a long history (realised vol,
+    which has two years) leave the default; IV rank passes the real threshold.
     """
     vals = [v for v in history if v is not None and v > 0]
-    if current is None or current <= 0 or len(vals) < 3:
+    if current is None or current <= 0 or len(vals) < max(min_samples, 3):
         return {"rank": None, "pct": None, "n": len(vals),
                 "min": min(vals) if vals else None, "max": max(vals) if vals else None}
     lo, hi = min(vals), max(vals)

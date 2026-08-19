@@ -353,14 +353,106 @@ def api_chain(symbol):
 
 
 # --------------------------------------------------------------------- ideas
+def board_exposure(ideas, date):
+    """Aggregate risk of taking the WHOLE board, which per-idea scores cannot see.
+
+    Every idea is scored on its own merits, so nothing stops the board being
+    twenty bullish trades at once.  Over 2026-08-13..19 every board ran 15-20
+    bullish of 25 with a net delta near +3, and the loss over that window was
+    mostly market beta rather than bad selection -- invisible until you add the
+    numbers up.  The same applies to concentration: one name appearing on four
+    consecutive boards is one position stacked four times, not four ideas.
+    """
+    if not ideas:
+        return {}
+    # Spot and beta per name, so exposure can be expressed in DOLLARS.
+    # Summing raw per-share deltas across a $77 stock and a $950 stock is
+    # meaningless -- 0.40 delta on MU is $380 of exposure, on UBER it is $31,
+    # and the old "net delta +2.60" added them as if they were the same thing.
+    spots, betas = {}, {}
+    for r in db.q("""SELECT sm.symbol, sm.spot, sm.rel_strength, sm.atr_pct
+                       FROM symbol_metrics sm
+                       JOIN (SELECT symbol s, MAX(ts) t FROM symbol_metrics GROUP BY symbol) m
+                         ON m.s = sm.symbol AND m.t = sm.ts"""):
+        spots[r["symbol"]] = r["spot"] or 0.0
+    spy_atr = db.scalar("""SELECT atr_pct FROM symbol_metrics WHERE symbol='SPY'
+                            ORDER BY ts DESC LIMIT 1""", default=None)
+    for r in db.q("""SELECT sm.symbol, sm.atr_pct FROM symbol_metrics sm
+                       JOIN (SELECT symbol s, MAX(ts) t FROM symbol_metrics GROUP BY symbol) m
+                         ON m.s = sm.symbol AND m.t = sm.ts"""):
+        # Volatility ratio as a beta proxy: no covariance history is stored, and
+        # sigma_i/sigma_mkt is the right order of magnitude for sizing.
+        betas[r["symbol"]] = ((r["atr_pct"] or 0) / spy_atr) if spy_atr else 1.0
+
+    mix, syms = {}, {}
+    net_delta = net_theta = net_vega = 0.0
+    dollar_delta = beta_delta = 0.0
+    credit = risk = 0
+    for i in ideas:
+        mix[i["direction"]] = mix.get(i["direction"], 0) + 1
+        syms[i["symbol"]] = syms.get(i["symbol"], 0) + 1
+        g = i.get("greeks") or {}
+        d = g.get("delta") or 0.0
+        qty = i.get("qty") or 1
+        sp = spots.get(i["symbol"], 0.0)
+        net_delta += d
+        dollar_delta += d * sp * 100.0 * qty
+        beta_delta += d * sp * 100.0 * qty * betas.get(i["symbol"], 1.0)
+        net_theta += (g.get("theta") or 0.0) * 100.0 * qty
+        net_vega += (g.get("vega") or 0.0) * 100.0 * qty
+        if (i.get("entry_price") or 0) < 0:
+            credit += 1
+        risk += i.get("risk_dollars") or 0.0
+
+    # Names that were also on the previous board -- taking both stacks the same bet.
+    prev = db.scalar("SELECT MAX(asof_date) FROM idea WHERE asof_date < ?", (date,))
+    repeats = []
+    if prev:
+        before = {r["symbol"] for r in
+                  db.q("SELECT DISTINCT symbol FROM idea WHERE asof_date=?", (prev,))}
+        repeats = sorted(s for s in syms if s in before)
+
+    n = len(ideas)
+    bullish = mix.get("bullish", 0)
+    return {
+        "n": n,
+        "direction_mix": mix,
+        "bullish_pct": round(100.0 * bullish / n, 1),
+        "net_delta": jnum(net_delta, 2),
+        "dollar_delta": jnum(dollar_delta, 0),
+        "beta_delta": jnum(beta_delta, 0),
+        "risk_vs_account": jnum(100.0 * risk / max(config.ACCOUNT_SIZE, 1), 1),
+        "net_theta": jnum(net_theta, 2),
+        "net_vega": jnum(net_vega, 2),
+        "credit": credit, "debit": n - credit,
+        "total_risk": jnum(risk, 0),
+        "concentration": sorted(({"symbol": s, "n": c} for s, c in syms.items() if c > 1),
+                                key=lambda x: -x["n"]),
+        "repeat_from_prev": repeats,
+        "prev_board": prev,
+        "dollar_delta_warning": (
+            "Taking the whole board at the suggested size carries %s of directional "
+            "exposure (%s beta-weighted to SPY) against a %s account — that is the "
+            "position, not the individual trades."
+            % ("${:,.0f}".format(dollar_delta), "${:,.0f}".format(beta_delta),
+               "${:,.0f}".format(config.ACCOUNT_SIZE)))
+            if abs(dollar_delta) > config.ACCOUNT_SIZE * 0.5 else None,
+        "skew_warning": (
+            "%d of %d ideas are bullish and the board carries %+.1f net delta — taking it "
+            "whole is a leveraged directional bet, not a diversified set."
+            % (bullish, n, net_delta)) if n and bullish / n >= 0.65 else None,
+    }
+
+
 @app.route("/api/ideas")
 def api_ideas():
     date = request.args.get("date") or db.scalar("SELECT MAX(asof_date) FROM idea")
     rows = db.q("SELECT * FROM idea WHERE asof_date=? ORDER BY score DESC", (date,))
     dates = [r["asof_date"] for r in
              db.q("SELECT DISTINCT asof_date FROM idea ORDER BY asof_date DESC LIMIT 30")]
-    return jsonify({"asof_date": date, "dates": dates,
-                    "ideas": [_clean_idea(i) for i in rows]})
+    ideas = [_clean_idea(i) for i in rows]
+    return jsonify({"asof_date": date, "dates": dates, "ideas": ideas,
+                    "exposure": board_exposure(ideas, date)})
 
 
 @app.route("/api/idea/<int:idea_id>/payoff")

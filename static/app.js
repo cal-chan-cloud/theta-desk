@@ -546,6 +546,7 @@
     list.sort((a, b) => key(a) - key(b));
 
     $("#ideaCount").textContent = `${list.length} idea${list.length === 1 ? "" : "s"}`;
+    renderExposure(state.ideas.exposure || {});
     const host = $("#ideaList"); host.innerHTML = "";
     if (!list.length) {
       host.innerHTML = `<div class="card">${emptyState("Nothing matches",
@@ -560,6 +561,41 @@
     state.ideas = await api("/api/ideas?date=" + encodeURIComponent(e.target.value));
     guard("#view-trades", renderIdeas);
   });
+
+  /* Board-level exposure. Per-idea scores are blind to it: nothing stops the
+   * board being twenty bullish trades at once, and over 2026-08-13..19 every
+   * board ran 15-20 bullish of 25 at roughly +3 net delta, which is where most
+   * of the drawdown came from -- not from picking bad individual trades. */
+  function renderExposure(x) {
+    const host = $("#boardExposure");
+    if (!host) return;
+    if (!x || !x.n) { host.innerHTML = ""; return; }
+    const mix = x.direction_mix || {};
+    const parts = Object.keys(mix).sort().map((k) =>
+      `<span class="badge ${k}">${k} ${mix[k]}</span>`).join(" ");
+    host.innerHTML = `
+      <div class="tiles" style="grid-template-columns:repeat(auto-fit,minmax(140px,1fr))">
+        <div class="tile"><div class="k">Board direction</div>
+          <div class="v sm ${x.bullish_pct >= 65 ? "warn" : ""}">${F.num(x.bullish_pct, 0)}% bullish</div>
+          <div class="s">${parts}</div></div>
+        <div class="tile"><div class="k">Net delta</div>
+          <div class="v sm ${cls(x.net_delta)}">${sgn(x.net_delta, 2)}</div>
+          <div class="s">taking every idea at 1×</div></div>
+        <div class="tile"><div class="k">Net theta / vega</div>
+          <div class="v sm">${usd(x.net_theta, 0)}<span class="dim"> / </span>${usd(x.net_vega, 0)}</div>
+          <div class="s">per day · per vol point</div></div>
+        <div class="tile"><div class="k">Credit vs debit</div>
+          <div class="v sm">${x.credit}<span class="dim"> / </span>${x.debit}</div>
+          <div class="s">short vs long premium</div></div>
+        <div class="tile"><div class="k">Total risk</div>
+          <div class="v sm">${usdC(x.total_risk)}</div>
+          <div class="s">whole board at 1× each</div></div>
+        <div class="tile"><div class="k">Repeated from ${x.prev_board || "prior board"}</div>
+          <div class="v sm ${(x.repeat_from_prev || []).length > 6 ? "warn" : ""}">${(x.repeat_from_prev || []).length} names</div>
+          <div class="s">${(x.repeat_from_prev || []).slice(0, 8).join(" ") || "none"}</div></div>
+      </div>
+      ${x.skew_warning ? `<ul class="warnings" style="margin-top:10px"><li>${esc(x.skew_warning)}</li></ul>` : ""}`;
+  }
 
   function gauge(score) {
     const v = Math.max(0, Math.min(100, score || 0));
@@ -996,6 +1032,11 @@
       xLabel: "Predicted POP", directLabels: false,
     });
 
+    if (sc.calibration_note) {
+      const cal = $("#chartCalibration");
+      if (cal) cal.insertAdjacentHTML("beforeend",
+        `<p class="hint" style="margin-top:8px">${esc(sc.calibration_note)}</p>`);
+    }
     const rows = sc.rows || [];
     $("#scannerTable").innerHTML =
       "<thead><tr><th>Date</th><th>Sym</th><th>Structure</th><th>Score</th><th>POP</th><th>P&L</th><th>Hit</th></tr></thead><tbody>" +
