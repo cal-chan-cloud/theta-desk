@@ -201,6 +201,34 @@ BOARD_MAX_PER_GROUP = 5          # ideas per correlated group (see GROUPS)
 BOARD_MAX_PER_SYMBOL = 2         # down from 3: one name, one thesis
 BOARD_ENFORCE = True
 
+# --------------------------------------------------------------------------
+# Hard limits, as opposed to score penalties.  MEASURED over the first 75 ideas
+# (2026-08-13..19, marked daily):
+#
+#   long_call          6 ideas   0% green   -$5,787   median return on risk -0.51
+#   bull_call_spread  23 ideas  35% green   -$3,171   median -0.16
+#   bull_put_spread   25 ideas  52% green     -$361   median  0.00
+#   debit  36 ideas  net -$9,495  mean risk $1,277
+#   credit 39 ideas  net   -$741  mean risk $  593
+#
+# and MU alone was -$7,083 of a -$10,236 total across 5 ideas on 4 boards.
+#
+# Two structural problems, both fixable without tuning anything to this sample:
+#
+# 1. An idea risking several times the per-trade budget was DEMOTED by the
+#    sizing score but never removed, so it still reached the board and still
+#    got taken at one contract.  A trade you cannot size is not a trade.
+# 2. A debit structure with a 27% chance of profit is a lottery ticket however
+#    good its modelled expectancy looks, because that expectancy leans entirely
+#    on the vol forecast being right about the future.
+MAX_RISK_MULTIPLE = 2.0          # drop ideas risking > this x the per-trade budget
+MIN_POP_DEBIT = 0.30             # a long-premium structure needs a real chance
+MIN_POP_CREDIT = 0.20
+# Same name proposed day after day becomes a concentrated bet by accumulation:
+# MU reached 5 live ideas that way.  Counted across recent boards, not just today.
+CONCENTRATION_LOOKBACK_DAYS = 5
+CONCENTRATION_MAX_RECENT = 4     # appearances on recent boards before we stop adding
+
 # Names that rise and fall together.  Four "independent" ideas on SPY, QQQ, IWM
 # and DIA are one index bet with four tickets; the same is true across the
 # semis.  Anything unlisted is its own group.

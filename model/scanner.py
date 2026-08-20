@@ -279,7 +279,14 @@ def score_idea(pos, exp, roll, metrics, dens_q, dens_p, vr, tr, sigma_p, drift_p
     # close to a pure *volatility* edge -- how much the structure is worth when
     # the market's own density is re-scaled to our forecast of realised vol --
     # rather than a directional bet wearing an expectancy costume.
-    comp["edge"] = _norm(ev_per_risk, 0.12)
+    # Expectancy per dollar of risk, blended with RISK-ADJUSTED expectancy.
+    #
+    # Raw EV/risk treats a lottery ticket and a grinder as equivalent when their
+    # means match, and the long calls that lost 100% of the time scored well on
+    # exactly that basis.  ev/sd penalises the dispersion the mean hides, which
+    # is ordinary portfolio theory rather than a fit to last week.
+    sharpe = ev_p.get("sharpe")
+    comp["edge"] = 0.6 * _norm(ev_per_risk, 0.12) + 0.4 * _norm(sharpe, 0.30)
 
     # Does the structure's vega sign agree with the vol read?
     vega_sign = 1.0 if g["vega"] > 0 else (-1.0 if g["vega"] < 0 else 0.0)
@@ -320,14 +327,22 @@ def score_idea(pos, exp, roll, metrics, dens_q, dens_p, vr, tr, sigma_p, drift_p
     # ---- hard filters ----------------------------------------------------
     if liq < 30:
         return None
+
+    # ---- hard limits (see config for the measurements behind these) --------
+    budget = config.ACCOUNT_SIZE * config.RISK_PER_TRADE_PCT
+    if risk_dollars > budget * config.MAX_RISK_MULTIPLE:
+        return None
+    floor = config.MIN_POP_CREDIT if pos.is_credit else config.MIN_POP_DEBIT
+    if ev_p["pop"] < floor:
+        return None
+    recent = metrics.get("recent_appearances") or 0
+    if recent >= config.CONCENTRATION_MAX_RECENT:
+        return None
     if pos.is_credit and max_l is not None:
         # A credit smaller than a tenth of the width is not worth the tail
         width = risk + abs(entry)
         if width > 0 and abs(entry) / width < 0.08:
             return None
-    if ev_p["pop"] < 0.20:
-        return None
-
     targets = strategies.build_targets(pos, spot, sigma_p, drift_p, now)
     qty = strategies.suggested_qty(risk)
 

@@ -26,7 +26,21 @@ $action = New-ScheduledTaskAction -Execute "cmd.exe" -Argument "/c `"`"$bat`"`""
 
 # 07:10 ET is after the option chains refresh for the new session but well
 # before the open, so the board is ready when you sit down.
+#
+# The trigger REPEATS every 4 hours for 12 hours, and that is not about
+# intraday freshness -- it is a catch-up.  On 2026-08-20 the machine was asleep
+# at 07:10; StartWhenAvailable did not fire it on wake and Task Scheduler
+# simply advanced NextRunTime to the following day, leaving the desk a full
+# session stale with no error anywhere.  A repeating trigger removes that
+# single point of failure: any later repetition picks the day up.
+#
+# Safe to repeat because the pipeline is idempotent -- it replaces the current
+# day's board rather than appending -- and MultipleInstances IgnoreNew means a
+# repetition that lands while a run is still going is skipped, not queued.
 $trigger = New-ScheduledTaskTrigger -Daily -At 7:10AM
+$trigger.Repetition = (New-ScheduledTaskTrigger -Once -At 7:10AM `
+    -RepetitionInterval (New-TimeSpan -Hours 4) `
+    -RepetitionDuration (New-TimeSpan -Hours 12)).Repetition
 
 $settings = New-ScheduledTaskSettingsSet `
     -AllowStartIfOnBatteries `

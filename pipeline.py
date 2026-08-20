@@ -478,6 +478,17 @@ def run(symbols=None, fresh=False, do_news=True, do_ideas=True, quiet=False):
                     traceback.print_exc()
 
         # PASS 2 -- rank each name's vol edge against its peers, then build.
+        # How often has each name already been proposed on recent boards?  A
+        # name that reappears every day accumulates into a concentrated bet
+        # nobody decided to make.
+        recent = {}
+        for r in db.q("""SELECT symbol, COUNT(*) n FROM idea
+                          WHERE asof_date >= date('now', ?) AND asof_date < ?
+                          GROUP BY symbol""",
+                      ("-%d day" % config.CONCENTRATION_LOOKBACK_DAYS,
+                       marketcal.session_date().isoformat())):
+            recent[r["symbol"]] = r["n"]
+
         edges = sorted((m.get("vol_edge") for m, _r in metrics_by_sym.values()
                         if m.get("vol_edge") is not None))
         if do_ideas and edges:
@@ -499,6 +510,7 @@ def run(symbols=None, fresh=False, do_news=True, do_ideas=True, quiet=False):
                                    WHERE symbol=? AND ts=?""",
                                (m["vol_edge_pctile"], m["vol_regime"], m["regime"],
                                 sym, m["ts"]))
+                m["recent_appearances"] = recent.get(sym, 0)
                 try:
                     all_ideas.extend(scanner.build_ideas(sym, roll, m, now=marketcal.now_utc()))
                 except Exception as e:                     # noqa: BLE001
