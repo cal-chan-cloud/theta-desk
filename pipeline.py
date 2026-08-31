@@ -399,6 +399,10 @@ def persist_ideas(ideas):
                 "ev_q": i["ev_q"], "warnings": i["warnings"],
                 "risk_dollars": i["risk_dollars"], "credit_debit": i["credit_debit"],
                 "label": i["label"],
+                # Horizon vs expiry expectancy: the whole point of the horizon
+                # change is being able to SEE the difference, so both are stored.
+                "ev_expiry": i.get("ev_expiry"), "pop_expiry": i.get("pop_expiry"),
+                "eval_days": i.get("eval_days"),
             }, default=str),
         })
     db.insert_dicts("idea", rows)

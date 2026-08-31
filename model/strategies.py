@@ -342,9 +342,17 @@ def evaluate(position, dens, moment=None, fees_per_spread=0.0):
     moment = moment or marketcal.expiry_moment(position.near_expiry)
     entry = position.net_price
     vals, probs = [], []
+    # Value each leg AT `moment`.  The old condition was
+    # `l.expiry <= position.near_expiry`, which is true for every leg of a
+    # single-expiry structure, so every position was always valued at intrinsic
+    # -- i.e. at expiry -- no matter what moment was requested.  That is the
+    # horizon mismatch: expectancy was computed at expiry while positions are
+    # held ~10 days and judged on the daily mark, so time decay never entered
+    # the number.  Measured over 247 idea-marks, theta was -$19,737 on debit
+    # structures and +$12,209 on credit ones; none of it was visible in EV.
     for S, p in dens:
         v = sum(l.qty * (bs.intrinsic(S, l.strike, l.right)
-                         if l.expiry <= position.near_expiry
+                         if moment >= marketcal.expiry_moment(l.expiry)
                          else l.value(S, position.spot_entry, moment))
                 for l in position.legs)
         vals.append(v - entry - fees_per_spread)
@@ -561,6 +569,30 @@ def build_targets(position, spot, sigma_p, drift_p, now=None, horizon_frac=0.6):
 
     return {"targets": rungs, "stop": stop, "time_stop": time_stop,
             "eval_date": eval_date.isoformat()}
+
+
+def horizon_for(position, t_vol_expiry, now=None):
+    """(moment, vol-year-fraction) of the horizon this trade is really held to.
+
+    The earlier of half the time to expiry or the 21-DTE time stop -- which is
+    what the exit policy already says, so expectancy and the target ladder now
+    describe the same trade.
+    """
+    now = now or marketcal.now_utc()
+    dte = max(position.dte(now), 0.05)
+    days = dte * config.EVAL_HORIZON_FRAC
+    if dte > config.TIME_STOP_DTE:
+        days = min(days, dte - config.TIME_STOP_DTE)
+    days = max(days, 1.0)
+    et = marketcal.to_et(now).replace(tzinfo=None).date() + dt.timedelta(days=int(round(days)))
+    if et >= position.near_expiry:
+        et = position.near_expiry - dt.timedelta(days=1)
+    moment = min(marketcal.et_to_utc(dt.datetime.combine(et, dt.time(16, 0))),
+                 marketcal.expiry_moment(position.near_expiry) - dt.timedelta(hours=1))
+    if moment <= now:
+        moment = now + dt.timedelta(hours=6)
+    t_h = max(marketcal.vol_year_fraction(et, now), 1e-4)
+    return moment, min(t_h, t_vol_expiry)
 
 
 def suggested_qty(risk_per_share, account=None, risk_pct=None):

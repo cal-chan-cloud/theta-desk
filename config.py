@@ -262,6 +262,34 @@ DEBIT_TP2_FRAC = 1.00            # +100%
 DEBIT_TP3_FRAC = 2.00
 DEBIT_STOP_FRAC = 0.50           # -50% on premium paid
 TIME_STOP_DTE = 21               # gamma risk ramps below this
+
+# --------------------------------------------------------------------------
+# Evaluation horizon.  THE MOST IMPORTANT CONSTANT IN THE MODEL.
+#
+# Expectancy used to be computed at EXPIRY while positions are held for about
+# ten days and judged on the daily mark.  For a long option almost all of the
+# expiry expectancy lives in tail paths that need the full time to develop; over
+# ten days you simply pay theta.  A P&L attribution over 247 idea-marks made the
+# size of this plain:
+#
+#   theta   debit structures  -$19,737     credit structures  +$12,209
+#   delta   only -$1,155 across everything -- 4% of the loss
+#
+# and per day, as a share of the money at risk:
+#
+#   long_strangle -3.05%/day   long_call -2.35%/day   bull_call_spread -0.57%
+#   iron_condor   +1.19%/day   short_strangle +14.46%/day
+#
+# A long call therefore surrendered roughly a quarter of its risk to decay over
+# a ten-day hold before direction or volatility did anything at all -- and none
+# of that appeared in the expectancy the ranking was built on.
+#
+# Evaluating at the horizon actually traded puts carry back into EV, POP and
+# CVaR where it belongs, instead of bolting a separate "carry" term onto the
+# score.  The horizon is the earlier of half the time to expiry or the documented
+# 21-DTE time stop, which is when the exit policy says to be out.
+EVAL_AT_HORIZON = True
+EVAL_HORIZON_FRAC = 0.5
 EARNINGS_BLACKOUT_DAYS = 2       # avoid holding short vega through a print
 
 # Ranking weights for the daily idea score.

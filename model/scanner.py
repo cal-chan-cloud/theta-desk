@@ -263,8 +263,14 @@ def score_idea(pos, exp, roll, metrics, dens_q, dens_p, vr, tr, sigma_p, drift_p
         return None
     fees = config.COMMISSION_PER_CONTRACT * len(pos.legs) / 100.0   # per share
 
+    # Expectancy at the horizon we actually trade, not at expiry.  See
+    # config.EVAL_AT_HORIZON for the attribution that motivated this.
+    horizon_moment, t_h = strategies.horizon_for(pos, exp["t_vol"], now)
+    dens_ph = strategies.transform_density(dens_q, spot, t_h, sigma_p, drift_p)         if config.EVAL_AT_HORIZON else dens_p
     ev_q = strategies.evaluate(pos, dens_q, fees_per_spread=fees)
-    ev_p = strategies.evaluate(pos, dens_p, fees_per_spread=fees)
+    ev_p = strategies.evaluate(pos, dens_ph, moment=horizon_moment, fees_per_spread=fees)
+    # Expiry expectancy is kept alongside so the two horizons stay comparable.
+    ev_expiry = strategies.evaluate(pos, dens_p, fees_per_spread=fees)
     if not ev_p:
         return None
 
@@ -355,6 +361,8 @@ def score_idea(pos, exp, roll, metrics, dens_q, dens_p, vr, tr, sigma_p, drift_p
         "ev": ev_p["ev"], "ev_pct_of_risk": ev_per_risk * 100.0,
         "ev_q": ev_q.get("ev"),
         "pop": ev_p["pop"], "cvar5": ev_p["cvar5"], "sharpe": ev_p["sharpe"],
+        "ev_expiry": ev_expiry.get("ev"), "pop_expiry": ev_expiry.get("pop"),
+        "eval_days": round((horizon_moment - now).total_seconds() / 86400.0, 1),
         "p05": ev_p["p05"], "p50": ev_p["p50"], "p95": ev_p["p95"],
         "greeks": {k: round(v, 5) for k, v in g.items()},
         "liquidity": round(liq, 1),

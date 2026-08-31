@@ -503,6 +503,49 @@ def test_density_and_ev():
     check("long option gains EV when forecast vol exceeds implied", ev2["ev"] > ev["ev"])
 
 
+def test_horizon_evaluation():
+    section("horizon vs expiry expectancy")
+    F, T, df = 100.0, 0.25, math.exp(-0.04 * 0.25)
+    sm = vol.fit_smile([(F * math.exp(i * 0.03), 0.30, 1.0) for i in range(-14, 15)], F, T)
+    dens = strategies.risk_neutral_density(sm, F, T, df)
+    exp0 = marketcal.session_date() + dt.timedelta(days=int(T * 365))
+    lc = strategies.Position("T", "long_call",
+                             [strategies.Leg("C", 105.0, exp0, 1, 3.0, 0.30, r=0.04)], F)
+
+    now = marketcal.now_utc()
+    at_expiry = strategies.evaluate(lc, dens)
+    hm, t_h = strategies.horizon_for(lc, T, now)
+    at_horizon = strategies.evaluate(lc, dens, moment=hm)
+    check("horizon lands strictly before expiry",
+          hm < marketcal.expiry_moment(lc.near_expiry) and hm > now)
+    check("horizon vol-time is shorter than to expiry", 0 < t_h <= T, "%.5f vs %.5f" % (t_h, T))
+
+    # THE bug this pins: evaluate() ignored `moment` and always used intrinsic,
+    # so a long option showed identical expectancy at every horizon and time
+    # decay never entered the ranking at all.
+    check("a long option is worth MORE before expiry than at it",
+          at_horizon["ev"] > at_expiry["ev"],
+          "horizon %.4f vs expiry %.4f" % (at_horizon["ev"], at_expiry["ev"]))
+    check("the two horizons actually differ", abs(at_horizon["ev"] - at_expiry["ev"]) > 1e-6)
+
+    # A short option is the mirror image: it has NOT yet collected all its theta.
+    sp = strategies.Position("T", "short_put",
+                             [strategies.Leg("P", 95.0, exp0, -1, 2.0, 0.30, r=0.04)], F)
+    hm2, _ = strategies.horizon_for(sp, T, now)
+    check("a short option has collected less by the horizon than by expiry",
+          strategies.evaluate(sp, dens, moment=hm2)["ev"] < strategies.evaluate(sp, dens)["ev"])
+
+    check("horizon respects the time stop",
+          config.EVAL_HORIZON_FRAC > 0 and config.EVAL_AT_HORIZON)
+    # A near-dated position must still produce a usable horizon.
+    soon = marketcal.session_date() + dt.timedelta(days=3)
+    near = strategies.Position("T", "long_call",
+                               [strategies.Leg("C", 105.0, soon, 1, 1.0, 0.30, r=0.04)], F)
+    hm3, t3 = strategies.horizon_for(near, 3 / 365.0, now)
+    check("short-dated horizon stays before its own expiry",
+          hm3 < marketcal.expiry_moment(soon) and t3 > 0)
+
+
 def test_targets():
     section("take-profit ladder")
     p = _mk_position("bull_put_spread")
@@ -971,6 +1014,7 @@ def main():
     test_chain_metrics()
     test_positions()
     test_density_and_ev()
+    test_horizon_evaluation()
     test_targets()
     test_fills()
     test_calendar()
