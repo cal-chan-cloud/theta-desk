@@ -402,7 +402,7 @@ def persist_ideas(ideas):
                 # Horizon vs expiry expectancy: the whole point of the horizon
                 # change is being able to SEE the difference, so both are stored.
                 "ev_expiry": i.get("ev_expiry"), "pop_expiry": i.get("pop_expiry"),
-                "eval_days": i.get("eval_days"),
+                "eval_days": i.get("eval_days"), "pop_raw": i.get("pop_raw"),
             }, default=str),
         })
     db.insert_dicts("idea", rows)

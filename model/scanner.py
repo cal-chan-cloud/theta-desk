@@ -248,6 +248,21 @@ def build_ideas(symbol, roll, metrics, now=None, max_per_symbol=None):
 NAKED_OK = {"short_strangle", "cash_secured_put", "covered_call"}
 
 
+def calibrate_pop(pop, is_credit):
+    """Shrink the modelled POP toward what that family actually delivered.
+
+    See config.POP_CALIBRATION for the measurement.  Credit barely moves (it was
+    already honest at -5 points); debit is cut hard, because a stated 38% turned
+    into a realised 14% across 84 resolved ideas.
+    """
+    if pop is None or not getattr(config, "POP_CALIBRATION", False):
+        return pop
+    f = config.POP_CALIB_FACTOR["credit" if is_credit else "debit"]
+    w = config.POP_CALIB_WEIGHT
+    out = pop * ((1.0 - w) + w * f)
+    return max(0.0, min(1.0, out))
+
+
 def score_idea(pos, exp, roll, metrics, dens_q, dens_p, vr, tr, sigma_p, drift_p, now):
     spot = roll["spot"]
     max_p, max_l, ub_profit, ub_loss = pos.extremes()
@@ -273,6 +288,16 @@ def score_idea(pos, exp, roll, metrics, dens_q, dens_p, vr, tr, sigma_p, drift_p
     ev_expiry = strategies.evaluate(pos, dens_p, fees_per_spread=fees)
     if not ev_p:
         return None
+
+    # POP is an EXPIRY statistic, deliberately, even though expectancy is now
+    # measured at the horizon actually traded.  The two answer different
+    # questions and must not be mixed: EV@horizon captures the carry you really
+    # pay, while "probability of profit" is what was calibrated against 152
+    # trades that were settled AT their expiry close.  Applying a calibration
+    # fitted on expiry outcomes to a 10-day-horizon probability would be
+    # comparing two different quantities.
+    pop_for_rule = (ev_expiry.get("pop") if ev_expiry else None) or ev_p["pop"]
+    pop_cal = calibrate_pop(pop_for_rule, pos.is_credit)
 
     # Where max loss is undefined, size and score against the 5% tail instead.
     risk = abs(max_l) if max_l is not None else abs(min(ev_p["p05"], -0.01))
@@ -315,6 +340,14 @@ def score_idea(pos, exp, roll, metrics, dens_q, dens_p, vr, tr, sigma_p, drift_p
 
     comp["structure"] = _structure_score(pos, roll, metrics, spot, exp)
 
+    # Calibrated probability of profit, centred so a coin flip scores zero.
+    # POP was previously used only as a pass/fail floor and never as a ranking
+    # signal, which is a large part of why the score came out ANTI-predictive
+    # (corr -0.137 with return on risk across 152 resolved ideas; the 82+ bucket
+    # won 0 of 8).  The score rewarded modelled expectancy, and modelled
+    # expectancy was highest exactly where the probability was most overstated.
+    comp["pop"] = max(-1.0, min(1.0, (pop_cal - 0.5) / 0.35)) if pop_cal is not None else 0.0
+
     # Affordability: one contract must fit the per-trade risk budget, or the
     # idea is academic.  Scored rather than filtered, so a bigger account still
     # sees it -- just not at the top of the board.
@@ -338,8 +371,11 @@ def score_idea(pos, exp, roll, metrics, dens_q, dens_p, vr, tr, sigma_p, drift_p
     budget = config.ACCOUNT_SIZE * config.RISK_PER_TRADE_PCT
     if risk_dollars > budget * config.MAX_RISK_MULTIPLE:
         return None
+    # The floor is applied to the RAW model POP so the counterfactual that set it
+    # (which replayed raw values) still means what it measured; the calibrated
+    # number is what gets displayed and scored.
     floor = config.MIN_POP_CREDIT if pos.is_credit else config.MIN_POP_DEBIT
-    if ev_p["pop"] < floor:
+    if pop_for_rule < floor:
         return None
     recent = metrics.get("recent_appearances") or 0
     if recent >= config.CONCENTRATION_MAX_RECENT:
@@ -360,7 +396,8 @@ def score_idea(pos, exp, roll, metrics, dens_q, dens_p, vr, tr, sigma_p, drift_p
         "components": {k: round(v, 3) for k, v in comp.items()},
         "ev": ev_p["ev"], "ev_pct_of_risk": ev_per_risk * 100.0,
         "ev_q": ev_q.get("ev"),
-        "pop": ev_p["pop"], "cvar5": ev_p["cvar5"], "sharpe": ev_p["sharpe"],
+        "pop": pop_cal, "pop_raw": pop_for_rule,
+        "cvar5": ev_p["cvar5"], "sharpe": ev_p["sharpe"],
         "ev_expiry": ev_expiry.get("ev"), "pop_expiry": ev_expiry.get("pop"),
         "eval_days": round((horizon_moment - now).total_seconds() / 86400.0, 1),
         "p05": ev_p["p05"], "p50": ev_p["p50"], "p95": ev_p["p95"],

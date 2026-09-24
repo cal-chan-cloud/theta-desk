@@ -39,6 +39,24 @@ def _expiry_ctx(roll, expiry):
     return best
 
 
+def settlement_spot(symbol, expiry):
+    """Underlying close ON the expiry date -- what the option actually settled against.
+
+    Marking an expired option at *today's* spot is not a marking error, it is a
+    different question entirely: it asks what the contract would be worth if it
+    expired now at the current price.  Measured across 152 resolved ideas the
+    spot used was a median 4.1% and a mean 5.6% away from the real expiry close
+    (max 28%), because a three-week gap in pipeline runs meant everything was
+    settled days or weeks late.  That turned expired long strangles into huge
+    fictional winners and expired short strangles into fictional losers -- the
+    exact opposite of what really happened -- and any model change made on the
+    back of it would have been backwards.
+    """
+    row = db.q1("""SELECT close FROM ohlc WHERE symbol=? AND date<=?
+                    ORDER BY date DESC LIMIT 1""", (symbol, str(expiry)[:10]))
+    return row["close"] if row else None
+
+
 def mark_leg(leg, roll, now=None):
     """(price, source) for one leg at current market."""
     now = now or marketcal.now_utc()
@@ -76,14 +94,18 @@ def mark_leg(leg, roll, now=None):
     return None, "none"
 
 
-def mark_legs(legs, roll, now=None):
+def mark_legs(legs, roll, now=None, symbol=None):
     total, sources = 0.0, set()
+    symbol = symbol or (roll or {}).get("symbol")
     for l in legs:
         px, src = mark_leg(l, roll, now)
         sources.add(src)
         if px is None:
             if src == "expired":
-                spot = (roll or {}).get("spot")
+                # Settle against the close on the EXPIRY date, not today's spot.
+                spot = settlement_spot(symbol, l.get("expiry")) if symbol else None
+                if spot is None:
+                    spot = (roll or {}).get("spot")
                 if spot is None:
                     return None, "none"
                 px = bs.intrinsic(spot, l["strike"], l["right"])
@@ -190,7 +212,7 @@ def mark_open_trades(rolls, today=None):
     for t in rows:
         legs = json.loads(t["legs_json"])
         roll = (rolls or {}).get(t["symbol"])
-        mark, src = mark_legs(legs, roll, now)
+        mark, src = mark_legs(legs, roll, now, symbol=t["symbol"])
         if mark is None:
             continue
         qty = t["qty"] or 1
@@ -235,7 +257,7 @@ def mark_ideas(rolls, today=None, lookback_days=120):
     for i in rows:
         legs = json.loads(i["legs_json"])
         roll = (rolls or {}).get(i["symbol"])
-        mark, src = mark_legs(legs, roll, now)
+        mark, src = mark_legs(legs, roll, now, symbol=i["symbol"])
         if mark is None:
             continue
         pnl = (mark - i["entry_price"]) * 100.0
@@ -251,9 +273,13 @@ def mark_ideas(rolls, today=None, lookback_days=120):
                 hit = "STOP"
         except (ValueError, TypeError):
             pass
+        exp_d = marketcal.parse_date(i["expiry"])
+        settled = exp_d and exp_d < marketcal.session_date()
+        spot_used = settlement_spot(i["symbol"], i["expiry"]) if settled else None
         db.insert_dict("idea_outcome", {
             "idea_id": i["id"], "asof_date": today,
-            "spot": (roll or {}).get("spot"), "mark": mark, "pnl": pnl,
+            "spot": spot_used if spot_used is not None else (roll or {}).get("spot"),
+            "mark": mark, "pnl": pnl,
             "pnl_pct": (pnl / basis * 100.0) if basis else None, "hit_target": hit,
         })
         n += 1

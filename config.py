@@ -222,12 +222,50 @@ BOARD_ENFORCE = True
 #    good its modelled expectancy looks, because that expectancy leans entirely
 #    on the vol forecast being right about the future.
 MAX_RISK_MULTIPLE = 2.0          # drop ideas risking > this x the per-trade budget
-MIN_POP_DEBIT = 0.30             # a long-premium structure needs a real chance
+MIN_POP_DEBIT = 0.45             # measured, see POP calibration below
 MIN_POP_CREDIT = 0.20
 # Same name proposed day after day becomes a concentrated bet by accumulation:
 # MU reached 5 live ideas that way.  Counted across recent boards, not just today.
 CONCENTRATION_LOOKBACK_DAYS = 5
 CONCENTRATION_MAX_RECENT = 4     # appearances on recent boards before we stop adding
+
+# --------------------------------------------------------------------------
+# PROBABILITY-OF-PROFIT CALIBRATION.  MEASURED on 152 ideas that reached expiry
+# and were settled at the close ON their expiry date.
+#
+#   family   n    stated POP   realised   gap
+#   credit   68      77%          72%      -5     <- honest
+#   debit    84      38%          14%     -24     <- badly overstated
+#
+# A 14% win rate where 38% was predicted, on 84 samples, is not noise.
+#
+# WHY the model is wrong only for long premium: the density's width comes from
+# a forecast of the MEAN realised vol, and realised vol is strongly right-
+# skewed.  Over the same window the forecast was almost perfect on the mean
+# (42.9% forecast vs 43.2% realised) yet it EXCEEDED the realised figure in 71%
+# of individual cases -- the mean is carried by a few violent names while the
+# typical one goes quiet.  Buying premium is a bet that YOUR name is one of the
+# movers, so a mean-calibrated density systematically overstates its chance.
+# Short premium is unaffected: it wins in the quiet majority, which is exactly
+# the case the mean over-weights.
+#
+# Calibration is applied as a shrink toward the measured realised rate, damped
+# by CALIB_WEIGHT so 152 observations in one six-week regime cannot fully
+# dictate the model.  Raise CALIB_WEIGHT as the sample grows.
+POP_CALIBRATION = True
+POP_CALIB_WEIGHT = 0.6           # 0 = trust the model, 1 = trust the sample
+POP_CALIB_FACTOR = {"credit": 0.94, "debit": 0.37}
+
+# The floors above were set by counterfactual, not taste.  Replaying the 152
+# resolved ideas with different debit POP floors:
+#     floor 0.00 -> net -$39,233   meanR -0.278   84 of 84 debits kept
+#     floor 0.40 -> net -$14,550   meanR -0.185   32 kept
+#     floor 0.45 -> net  -$6,666   meanR -0.068    8 kept
+#     floor 0.50 -> net  -$1,254   meanR +0.010    0 kept  (credit-only book)
+# 0.45 is chosen deliberately over 0.50: no debit in the sample cleared 0.50, so
+# that floor bans long premium outright, which would be fitting to a single
+# quiet regime rather than correcting a model error.  Long premium is supposed
+# to lose in quiet markets and pay in violent ones.
 
 # Names that rise and fall together.  Four "independent" ideas on SPY, QQQ, IWM
 # and DIA are one index bet with four tickets; the same is true across the
@@ -310,13 +348,14 @@ DRIFT_TILT_SHARPE = 0.10
 DRIFT_NEWS_WEIGHT = 0.04
 
 IDEA_WEIGHTS = {
-    "edge": 0.27,        # model EV per dollar risked
-    "vol_edge": 0.18,    # implied vs forecast vol mismatch
-    "trend": 0.16,       # directional agreement
-    "liquidity": 0.12,
-    "news": 0.07,
+    "edge": 0.20,        # model EV per dollar risked (was 0.27)
+    "pop": 0.20,         # calibrated probability of profit -- NEW
+    "vol_edge": 0.14,    # implied vs forecast vol mismatch
+    "trend": 0.12,       # directional agreement
+    "liquidity": 0.10,
+    "news": 0.06,
     "structure": 0.08,   # GEX / OI walls / max pain support
-    "sizing": 0.12,      # does one contract fit the risk budget?
+    "sizing": 0.10,      # does one contract fit the risk budget?
 }
 
 # --------------------------------------------------------------------------

@@ -740,6 +740,56 @@ def test_board_construction():
           config.DRIFT_TILT_SHARPE <= 0.15, "%.2f" % config.DRIFT_TILT_SHARPE)
 
 
+def test_settlement_and_pop_calibration():
+    section("settlement and POP calibration")
+    import journal
+    db.init()
+    # Settlement must use the close ON the expiry date, not the latest close.
+    sym = db.scalar("SELECT symbol FROM ohlc GROUP BY symbol ORDER BY COUNT(*) DESC LIMIT 1")
+    rows = db.q("SELECT date, close FROM ohlc WHERE symbol=? ORDER BY date DESC LIMIT 40", (sym,))
+    if len(rows) > 25:
+        past, latest = rows[20], rows[0]
+        got = journal.settlement_spot(sym, past["date"])
+        check("settlement_spot returns the close on that date",
+              close(got, past["close"], 1e-9), "%s vs %s" % (got, past["close"]))
+        check("settlement_spot is NOT the latest close when the date is older",
+              abs(got - latest["close"]) > 1e-9 or abs(past["close"] - latest["close"]) < 1e-9)
+    check("settlement_spot tolerates a non-trading date",
+          journal.settlement_spot(sym, "2026-01-03") is not None)
+    check("settlement_spot returns None for an unknown symbol",
+          journal.settlement_spot("__NOPE__", "2026-06-01") is None)
+
+    # An expired leg must settle against its own expiry, not today.
+    exp = rows[20]["date"] if len(rows) > 25 else "2026-06-01"
+    legs = [{"right": "C", "strike": 1.0, "expiry": exp, "qty": 1}]
+    mk, src = journal.mark_legs(legs, {"symbol": sym, "spot": 999999.0, "expiries": []},
+                                symbol=sym)
+    check("a deep-ITM expired call settles at its expiry close, not today's spot",
+          mk is not None and abs(mk - (journal.settlement_spot(sym, exp) - 1.0)) < 1e-6,
+          "got %s" % mk)
+
+    # POP calibration: debit cut hard, credit barely moved, bounded and monotone.
+    for raw in (0.10, 0.30, 0.50, 0.77, 0.95):
+        d = scanner.calibrate_pop(raw, False)
+        c = scanner.calibrate_pop(raw, True)
+        check("POP %.0f%%: debit shrinks more than credit" % (raw * 100), d < c <= raw + 1e-9,
+              "debit %.3f credit %.3f" % (d, c))
+        check("  stays a probability", 0.0 <= d <= 1.0 and 0.0 <= c <= 1.0)
+    check("POP calibration is monotone",
+          scanner.calibrate_pop(0.2, False) < scanner.calibrate_pop(0.6, False)
+          < scanner.calibrate_pop(0.9, False))
+    check("credit calibration is nearly a no-op (it was already honest)",
+          abs(scanner.calibrate_pop(0.77, True) / 0.77 - 1) < 0.06)
+    check("debit calibration is a real cut (38% stated -> 14% realised)",
+          scanner.calibrate_pop(0.38, False) < 0.30,
+          "%.3f" % scanner.calibrate_pop(0.38, False))
+    check("calibration passes None through", scanner.calibrate_pop(None, True) is None)
+    check("POP is now a scored component", "pop" in config.IDEA_WEIGHTS)
+    check("weights still sum to 1", abs(sum(config.IDEA_WEIGHTS.values()) - 1.0) < 1e-9)
+    check("debit POP floor was raised to the measured level",
+          config.MIN_POP_DEBIT >= 0.45, "%.2f" % config.MIN_POP_DEBIT)
+
+
 def test_scanner():
     section("scanner regimes")
     check("high IV vs forecast reads rich",
@@ -841,7 +891,14 @@ def test_live():
                       "atm %.4f mfiv %.4f" % (check_atm, m["mfiv"]))
         check("most expiries are arbitrage-free", clean >= len(roll["expiries"]) * 0.7,
               "%d/%d clean" % (clean, len(roll["expiries"])))
-        front = roll["expiries"][min(3, len(roll["expiries"]) - 1)]
+        # Pick a tenor where implied vol is actually well determined.  Index 3
+        # can be a 5-DTE contract; at that maturity vega is near zero, so a
+        # normal 6% quote spread becomes ~2 vol points and the comparison
+        # measures quote granularity rather than whether our solver agrees with
+        # the vendor.  (Observed: SPY 5-DTE at 10.7% vol gave a 1.9-point median
+        # gap while the smile's own fit RMSE was 0.0034.)
+        usable = [m for m in roll["expiries"] if (m.get("dte") or 0) >= 20]
+        front = usable[0] if usable else roll["expiries"][-1]
         check("forward is near spot for a short tenor",
               abs(front["forward"] / roll["spot"] - 1) < 0.05,
               "F=%.2f S=%.2f" % (front["forward"], roll["spot"]))
@@ -1022,6 +1079,7 @@ def main():
     test_sentiment()
     test_vol_calibration()
     test_board_construction()
+    test_settlement_and_pop_calibration()
     test_scanner()
     test_db()
     if live:
