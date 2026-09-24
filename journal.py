@@ -39,6 +39,31 @@ def _expiry_ctx(roll, expiry):
     return best
 
 
+def surface_on(symbol, asof_date, expiry):
+    """Rebuild the fitted vol surface stored for (symbol, date, expiry).
+
+    expiry_metrics keeps the smile's coefficients, scale and strike range
+    forever -- which is what makes a past day's option prices reconstructible
+    from a few thousand rows instead of a hundred thousand quotes.  Used to
+    rebuild a mark history that would otherwise be gone.
+    """
+    from model import vol as _vol
+    r = db.q1("""SELECT em.* FROM expiry_metrics em
+                  JOIN chain_snapshot cs ON cs.id = em.snapshot_id
+                 WHERE em.symbol=? AND em.asof_date=?
+                 ORDER BY ABS(julianday(em.expiry) - julianday(?)) ASC, cs.ts DESC
+                 LIMIT 1""", (symbol, asof_date, str(expiry)[:10]))
+    if not r or r.get("smile_a") is None or not r.get("smile_scale"):
+        return None
+    sm = _vol.Smile(r["smile_a"], r["smile_b"], r["smile_c"], r.get("smile_rmse") or 0.0,
+                    r.get("smile_k_min") or -0.3, r.get("smile_k_max") or 0.3,
+                    r["smile_scale"], r.get("n_quotes") or 0,
+                    r.get("t_years") or 0.1, r.get("forward") or 0.0)
+    return {"smile": sm, "rate": r.get("rate") or config.DEFAULT_RISK_FREE,
+            "div_yield": r.get("div_yield") or 0.0, "forward": r.get("forward"),
+            "expiry": r["expiry"]}
+
+
 def settlement_spot(symbol, expiry):
     """Underlying close ON the expiry date -- what the option actually settled against.
 
@@ -248,11 +273,16 @@ def mark_ideas(rolls, today=None, lookback_days=120):
     """Forward-test every idea the scanner has ever emitted."""
     today = today or marketcal.session_date().isoformat()
     now = marketcal.now_utc()
+    # An idea that already hit a target or a stop is CLOSED -- its P&L is frozen
+    # at the exit, exactly as the trade plan says.  Marking it onward would be
+    # reporting a position the plan says you are no longer in.
     rows = db.q("""SELECT id, symbol, strategy, expiry, legs_json, entry_price,
                           max_profit, max_loss, targets_json, asof_date
                      FROM idea
-                    WHERE asof_date >= date('now', ?) AND asof_date < ?""",
-                ("-%d day" % lookback_days, today))
+                    WHERE asof_date >= date('now', ?) AND asof_date < ?
+                      AND (exit_date IS NULL OR ? = 0)""",
+                ("-%d day" % lookback_days, today,
+                 1 if getattr(config, "MANAGED_EXITS", False) else 0))
     n = 0
     for i in rows:
         legs = json.loads(i["legs_json"])
@@ -263,16 +293,32 @@ def mark_ideas(rolls, today=None, lookback_days=120):
         pnl = (mark - i["entry_price"]) * 100.0
         basis = abs(i["entry_price"]) * 100.0
         hit = None
+        exit_reason = None
         try:
             tg = json.loads(i["targets_json"] or "{}")
+            move = mark - i["entry_price"]
             for t in tg.get("targets", []):
-                if t.get("pnl") is not None and (mark - i["entry_price"]) >= t["pnl"]:
+                if t.get("pnl") is not None and move >= t["pnl"]:
                     hit = t["name"]
             stop = tg.get("stop")
-            if stop and stop.get("pnl") is not None and (mark - i["entry_price"]) <= stop["pnl"]:
+            if stop and stop.get("pnl") is not None and move <= stop["pnl"]:
                 hit = "STOP"
+            # First target reached, or the stop, closes the position.
+            if hit and hit != "T3":
+                exit_reason = hit
+            elif hit == "T3":
+                exit_reason = "T3"
+            # Time stop: the plan says be out at TIME_STOP_DTE.
+            if not exit_reason:
+                dleft = (marketcal.parse_date(i["expiry"]) - marketcal.session_date()).days
+                if dleft <= config.TIME_STOP_DTE and dleft >= 0 and tg.get("time_stop"):
+                    exit_reason = "TIME"
         except (ValueError, TypeError):
             pass
+        if exit_reason and getattr(config, "MANAGED_EXITS", False):
+            db.execute("""UPDATE idea SET exit_date=?, exit_reason=?, exit_pnl=?
+                           WHERE id=? AND exit_date IS NULL""",
+                       (today, exit_reason, pnl, i["id"]))
         exp_d = marketcal.parse_date(i["expiry"])
         settled = exp_d and exp_d < marketcal.session_date()
         spot_used = settlement_spot(i["symbol"], i["expiry"]) if settled else None
@@ -374,12 +420,20 @@ def performance():
 
 
 def idea_performance(days=90):
-    """How the scanner's own suggestions have played out."""
+    """How the scanner's own suggestions have played out, UNDER ITS OWN PLAN.
+
+    Where an idea hit a target or a stop, the frozen exit P&L is used rather
+    than its value at expiry -- otherwise the number describes buy-and-hold,
+    which the model never recommends.
+    """
     rows = db.q("""SELECT i.id, i.asof_date, i.symbol, i.strategy, i.score, i.dte,
                           i.entry_price, i.pop, i.ev, i.max_profit, i.max_loss,
                           i.expiry,
                           julianday(i.expiry) - julianday('now') AS dte_left,
-                          o.asof_date AS mark_date, o.pnl, o.pnl_pct, o.hit_target
+                          o.asof_date AS mark_date,
+                          COALESCE(i.exit_pnl, o.pnl) AS pnl, o.pnl_pct,
+                          COALESCE(i.exit_reason, o.hit_target) AS hit_target,
+                          i.exit_reason, i.exit_date
                      FROM idea i
                      JOIN idea_outcome o ON o.idea_id = i.id
                     WHERE i.asof_date >= date('now', ?)
@@ -437,6 +491,13 @@ def idea_performance(days=90):
         "n": len(rows),
         "resolved": len(resolved),
         "open": len(still_open),
+        # Managed vs held, because the difference is the largest effect measured
+        # so far: across 152 resolved ideas the plan's own stop/target ladder
+        # moved meanR from -0.278 to -0.135 and the net from -$39,233 to
+        # -$18,155 -- entirely on the long-premium side, where a stop keeps a
+        # decaying option from bleeding to zero.
+        "managed_exits": sum(1 for r in rows if r.get("exit_reason") in ("T1", "STOP", "TIME")),
+        "held_to_expiry": sum(1 for r in rows if r.get("exit_reason") in (None, "SETTLED", "RECON")),
         "calibration_note": note,
         "overall": overall,
         "by_strategy": {k: _stats(v) for k, v in by_strategy.items()},

@@ -241,6 +241,12 @@ CREATE TABLE IF NOT EXISTS idea (
     targets_json  TEXT,
     rationale     TEXT,
     metrics_json  TEXT,
+    -- Managed exit: once a target or stop is hit the idea is CLOSED and its
+    -- P&L frozen.  Without this the forward test silently measures
+    -- hold-to-expiry, which is not the strategy the model recommends.
+    exit_date     TEXT,
+    exit_reason   TEXT,
+    exit_pnl      REAL,
     UNIQUE (asof_date, symbol, strategy, expiry, legs_json)
 );
 CREATE INDEX IF NOT EXISTS ix_idea_date ON idea(asof_date DESC, score DESC);

@@ -302,6 +302,29 @@ DEBIT_STOP_FRAC = 0.50           # -50% on premium paid
 TIME_STOP_DTE = 21               # gamma risk ramps below this
 
 # --------------------------------------------------------------------------
+# Does the forward test obey the model's OWN exit rules?
+#
+# It did not, and that quietly mis-stated every result: ideas were marked daily
+# until expiry, so the recorded performance was buy-and-hold-to-expiry -- a
+# strategy the model never recommends and nobody would run.  Replaying the
+# ladder over the 152 resolved ideas:
+#
+#                       meanR      net
+#   hold to expiry     -0.278   -$39,233
+#   managed T1/stop    -0.175   -$21,576     <- the strategy actually proposed
+#
+# and the entire benefit is on the long-premium side, where a stop prevents a
+# decaying option bleeding to zero:
+#   debit   -0.511 -> -0.297      credit  +0.010 -> -0.025
+#
+# Credit is marginally WORSE managed, because taking 50% of the credit caps the
+# win while leaving the tail intact -- the standard critique of that rule.  That
+# result is regime-dependent (this was a quiet stretch where short premium
+# mostly expired worthless) so the policy is left alone; what is fixed is the
+# measurement.
+MANAGED_EXITS = True
+
+# --------------------------------------------------------------------------
 # Evaluation horizon.  THE MOST IMPORTANT CONSTANT IN THE MODEL.
 #
 # Expectancy used to be computed at EXPIRY while positions are held for about
