@@ -270,19 +270,22 @@ def mark_open_trades(rolls, today=None):
 
 # -------------------------------------------------------------------- ideas
 def mark_ideas(rolls, today=None, lookback_days=120):
-    """Forward-test every idea the scanner has ever emitted."""
+    """Mark every idea the scanner has emitted, every run, until it settles.
+
+    This only RECORDS marks.  Whether and when the plan exits is decided by
+    replay.sync_exits from the full mark history, so a missed day, a late run
+    or a rule change is re-derived rather than frozen in.  Ideas are marked
+    past their exit on purpose: the held-to-expiry value is what POP is
+    calibrated against, and a real mark beats a reconstructed one.
+    """
     today = today or marketcal.session_date().isoformat()
     now = marketcal.now_utc()
-    # An idea that already hit a target or a stop is CLOSED -- its P&L is frozen
-    # at the exit, exactly as the trade plan says.  Marking it onward would be
-    # reporting a position the plan says you are no longer in.
     rows = db.q("""SELECT id, symbol, strategy, expiry, legs_json, entry_price,
                           max_profit, max_loss, targets_json, asof_date
                      FROM idea
                     WHERE asof_date >= date('now', ?) AND asof_date < ?
-                      AND (exit_date IS NULL OR ? = 0)""",
-                ("-%d day" % lookback_days, today,
-                 1 if getattr(config, "MANAGED_EXITS", False) else 0))
+                      AND expiry >= date(?, '-7 day')""",
+                ("-%d day" % lookback_days, today, today))
     n = 0
     for i in rows:
         legs = json.loads(i["legs_json"])
@@ -293,7 +296,6 @@ def mark_ideas(rolls, today=None, lookback_days=120):
         pnl = (mark - i["entry_price"]) * 100.0
         basis = abs(i["entry_price"]) * 100.0
         hit = None
-        exit_reason = None
         try:
             tg = json.loads(i["targets_json"] or "{}")
             move = mark - i["entry_price"]
@@ -303,22 +305,8 @@ def mark_ideas(rolls, today=None, lookback_days=120):
             stop = tg.get("stop")
             if stop and stop.get("pnl") is not None and move <= stop["pnl"]:
                 hit = "STOP"
-            # First target reached, or the stop, closes the position.
-            if hit and hit != "T3":
-                exit_reason = hit
-            elif hit == "T3":
-                exit_reason = "T3"
-            # Time stop: the plan says be out at TIME_STOP_DTE.
-            if not exit_reason:
-                dleft = (marketcal.parse_date(i["expiry"]) - marketcal.session_date()).days
-                if dleft <= config.TIME_STOP_DTE and dleft >= 0 and tg.get("time_stop"):
-                    exit_reason = "TIME"
         except (ValueError, TypeError):
             pass
-        if exit_reason and getattr(config, "MANAGED_EXITS", False):
-            db.execute("""UPDATE idea SET exit_date=?, exit_reason=?, exit_pnl=?
-                           WHERE id=? AND exit_date IS NULL""",
-                       (today, exit_reason, pnl, i["id"]))
         exp_d = marketcal.parse_date(i["expiry"])
         settled = exp_d and exp_d < marketcal.session_date()
         spot_used = settlement_spot(i["symbol"], i["expiry"]) if settled else None
@@ -333,9 +321,6 @@ def mark_ideas(rolls, today=None, lookback_days=120):
 
 
 # ------------------------------------------------------------- performance
-# A position is treated as resolved for calibration once it is within this many
-# days of expiry -- by then the mark and the settled outcome have converged.
-CALIB_DTE_LEFT = 3
 CALIB_MIN_PER_BUCKET = 5
 
 
@@ -433,7 +418,7 @@ def idea_performance(days=90):
                           o.asof_date AS mark_date,
                           COALESCE(i.exit_pnl, o.pnl) AS pnl, o.pnl_pct,
                           COALESCE(i.exit_reason, o.hit_target) AS hit_target,
-                          i.exit_reason, i.exit_date
+                          i.exit_reason, i.exit_date, i.held_pnl, i.metrics_json
                      FROM idea i
                      JOIN idea_outcome o ON o.idea_id = i.id
                     WHERE i.asof_date >= date('now', ?)
@@ -464,20 +449,31 @@ def idea_performance(days=90):
     # ideas on the board and zero past expiry, the old chart was drawing a
     # verdict out of pure noise.
     #
-    # So calibration is computed ONLY from ideas that have reached expiry (or
-    # are inside the final few days, where the mark and the outcome converge).
-    # Everything still running is reported separately as open exposure.
-    resolved = [r for r in rows if (r["dte_left"] is not None and r["dte_left"] <= CALIB_DTE_LEFT
-                                    and r["pnl"] is not None)]
+    # So calibration is computed ONLY from ideas that have settled, and against
+    # their HELD-TO-EXPIRY value (held_pnl, written by replay.sync_exits) -- a
+    # managed exit on day 6 says nothing about where the stock closed on
+    # expiry, which is the event POP is a probability of.
+    #
+    # The POP compared is the one the site DISPLAYS, i.e. calibrated.  Boards
+    # from before calibration stored the raw number, so it is calibrated here
+    # on the fly; boards since store both (metrics.pop_raw) and `pop` is
+    # already calibrated -- calibrating it again would double-count.
+    from model import scanner as _scanner
+    for r in rows:
+        m = json.loads(r.get("metrics_json") or "{}")
+        r["pop_shown"] = r["pop"] if "pop_raw" in m else _scanner.calibrate_pop(
+            r["pop"], m.get("credit_debit") == "credit")
+        r.pop("metrics_json", None)
+    resolved = [r for r in rows if r.get("held_pnl") is not None]
     still_open = [r for r in rows if r not in resolved]
 
     calib = []
-    for lo in range(20, 100, 10):
-        grp = [r for r in resolved if r["pop"] is not None and lo <= r["pop"] * 100 < lo + 10]
+    for lo in range(0, 100, 10):
+        grp = [r for r in resolved if r["pop_shown"] is not None and lo <= r["pop_shown"] * 100 < lo + 10]
         if len(grp) >= CALIB_MIN_PER_BUCKET:
             calib.append({
                 "predicted": lo + 5,
-                "realised": 100.0 * sum(1 for r in grp if r["pnl"] > 0) / len(grp),
+                "realised": 100.0 * sum(1 for r in grp if r["held_pnl"] > 0) / len(grp),
                 "n": len(grp),
             })
     note = None
@@ -492,12 +488,14 @@ def idea_performance(days=90):
         "resolved": len(resolved),
         "open": len(still_open),
         # Managed vs held, because the difference is the largest effect measured
-        # so far: across 152 resolved ideas the plan's own stop/target ladder
-        # moved meanR from -0.278 to -0.135 and the net from -$39,233 to
-        # -$18,155 -- entirely on the long-premium side, where a stop keeps a
-        # decaying option from bleeding to zero.
+        # so far.  Replayed over 191 settled ideas with exit costs (replay.py):
+        # held to expiry meanR -0.284 / -$42,144; managed to plan -0.047 /
+        # -$13,567 -- with credit positive (+0.025R) once the stop is held off
+        # across earnings prints.
         "managed_exits": sum(1 for r in rows if r.get("exit_reason") in ("T1", "STOP", "TIME")),
-        "held_to_expiry": sum(1 for r in rows if r.get("exit_reason") in (None, "SETTLED", "RECON")),
+        "held_to_expiry": sum(1 for r in rows if r.get("exit_reason") == "EXPIRY"),
+        "held_total": sum(r["held_pnl"] for r in resolved),
+        "managed_total_resolved": sum(r["pnl"] or 0.0 for r in resolved),
         "calibration_note": note,
         "overall": overall,
         "by_strategy": {k: _stats(v) for k, v in by_strategy.items()},

@@ -120,13 +120,29 @@ def _norm(x, scale):
     return math.tanh(x / scale)
 
 
+def in_time_stop_gap(cal_dte):
+    """True for an expiry the 21-DTE time stop would close almost at once.
+
+    See config.MIN_DAYS_BEFORE_TIME_STOP.  Replayed, credit ideas opened at
+    22-27 DTE returned -0.10R (27% win) against +0.12R for 7-21 DTE held to
+    expiry and -0.03R for 28-35; and they were scored on horizons of 1-6 days.
+    """
+    ts = config.TIME_STOP_DTE
+    return ts < cal_dte < ts + getattr(config, "MIN_DAYS_BEFORE_TIME_STOP", 0)
+
+
 def pick_expiries(expiries, earnings_date=None, min_dte=None, max_dte=None,
-                  preferred=None, limit=3):
+                  preferred=None, limit=3, today=None):
     """Choose expiries to trade: the preferred band, plus the earnings expiry."""
     min_dte = min_dte if min_dte is not None else config.SCAN_MIN_DTE
     max_dte = max_dte if max_dte is not None else config.SCAN_MAX_DTE
     preferred = preferred or config.SCAN_PREFERRED_DTE
-    cands = [e for e in expiries if min_dte <= (e.get("dte") or 0) <= max_dte]
+    today = today or marketcal.session_date()
+
+    def ok(e):
+        return not in_time_stop_gap((marketcal.parse_date(e["expiry"]) - today).days)
+
+    cands = [e for e in expiries if min_dte <= (e.get("dte") or 0) <= max_dte and ok(e)]
     if not cands:
         return []
     mid = 0.5 * (preferred[0] + preferred[1])
@@ -135,7 +151,7 @@ def pick_expiries(expiries, earnings_date=None, min_dte=None, max_dte=None,
     if earnings_date:
         after = [e for e in expiries
                  if marketcal.parse_date(e["expiry"]) > earnings_date
-                 and (e.get("dte") or 0) <= max_dte]
+                 and (e.get("dte") or 0) <= max_dte and ok(e)]
         if after:
             first = min(after, key=lambda e: e["dte"])
             if first not in chosen:
@@ -194,7 +210,7 @@ def build_ideas(symbol, roll, metrics, now=None, max_per_symbol=None):
     tilt = max(min(tilt, lim), -lim)
 
     today = marketcal.session_date()
-    expiries = pick_expiries(roll["expiries"], earnings_date)
+    expiries = pick_expiries(roll["expiries"], earnings_date, today=today)
     ideas = []
     for exp in expiries:
         if not exp.get("smile_obj"):
@@ -263,6 +279,28 @@ def calibrate_pop(pop, is_credit):
     return max(0.0, min(1.0, out))
 
 
+def structural_block(pos, metrics, ub_loss, now=None):
+    """(reason this structure may not be opened today or None, earnings date inside it)."""
+    # Earnings inside the trade.  The stop is held off across the print (see
+    # strategies.stop_armed_from), which is only safe when the worst case is
+    # the width -- so a position that spans a print must be defined-risk.
+    edate = marketcal.parse_date(metrics["earnings_date"]) if metrics.get("earnings_date") else None
+    if not (edate and marketcal.session_date() <= edate <= pos.near_expiry):
+        edate = None
+    if edate and (ub_loss or pos.strategy in NAKED_OK) and not config.EARNINGS_NAKED_OK:
+        return "undefined risk across earnings", edate
+
+    # Long premium is never OPENED inside the time stop: the plan's own rule
+    # says a debit position is out by then, because theta outruns gamma.
+    # Replayed, debits opened at 7-21 DTE were the worst debit bucket, -0.24R
+    # (39% win, n=23).  Stock-backed structures are exempt -- their "debit" is
+    # the share purchase, not decaying premium.
+    if (not pos.is_credit and not any(l.right == "S" for l in pos.legs)
+            and pos.cal_dte(now) <= config.TIME_STOP_DTE):
+        return "long premium inside the time stop", edate
+    return None, edate
+
+
 def score_idea(pos, exp, roll, metrics, dens_q, dens_p, vr, tr, sigma_p, drift_p, now):
     spot = roll["spot"]
     max_p, max_l, ub_profit, ub_loss = pos.extremes()
@@ -271,6 +309,10 @@ def score_idea(pos, exp, roll, metrics, dens_q, dens_p, vr, tr, sigma_p, drift_p
     if ub_loss and pos.strategy not in NAKED_OK:
         return None
     if max_l is not None and max_l >= 0:
+        return None
+
+    blocked, edate = structural_block(pos, metrics, ub_loss, now)
+    if blocked:
         return None
 
     entry = pos.net_price
@@ -385,7 +427,7 @@ def score_idea(pos, exp, roll, metrics, dens_q, dens_p, vr, tr, sigma_p, drift_p
         width = risk + abs(entry)
         if width > 0 and abs(entry) / width < 0.08:
             return None
-    targets = strategies.build_targets(pos, spot, sigma_p, drift_p, now)
+    targets = strategies.build_targets(pos, spot, sigma_p, drift_p, now, earnings_date=edate)
     qty = strategies.suggested_qty(risk)
 
     d = pos.to_dict()

@@ -232,6 +232,19 @@ def dte(expiry_date, now=None):
     return (expiry_moment(expiry_date) - now).total_seconds() / 86400.0
 
 
+def calendar_dte(expiry_date, now=None):
+    """Whole calendar days from the session date to expiry.
+
+    This is the DTE the trade plan is written in -- the 21-DTE time stop has
+    always been enforced as `(expiry - session date).days <= 21` -- so every
+    decision ABOUT the time stop uses it too.  The fractional `dte()` above is
+    for pricing only.  Mixing the two is how an expiry 22 calendar days out
+    was scored on a 0.7-day horizon and then time-stopped the next session.
+    """
+    now = now or now_utc()
+    return (parse_date(expiry_date) - session_date(to_et(now).replace(tzinfo=None))).days
+
+
 def parse_date(s):
     if isinstance(s, dt.date):
         return s

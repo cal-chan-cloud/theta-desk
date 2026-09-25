@@ -146,6 +146,10 @@ class Position:
     def dte(self, now=None):
         return marketcal.dte(self.near_expiry, now)
 
+    def cal_dte(self, now=None):
+        """Calendar DTE -- what the time stop is measured in (see marketcal)."""
+        return marketcal.calendar_dte(self.near_expiry, now)
+
     def payoff(self, S):
         """P&L per share at the near expiry, treating longer legs at intrinsic."""
         val = sum(l.qty * bs.intrinsic(S, l.strike, l.right) for l in self.legs)
@@ -423,7 +427,22 @@ def _solve_date_for_value(position, target_pnl, S, now, max_days):
     return None
 
 
-def build_targets(position, spot, sigma_p, drift_p, now=None, horizon_frac=0.6):
+def stop_armed_from(earnings_date):
+    """First session a stop may fire on when an earnings print sits inside the trade.
+
+    The print lands either before the open on E or after the close on E, so the
+    gap is in the marks by the close of E+1.  A stop firing on those marks sells
+    at the widest spread, before the post-event vol crush, after the one move
+    the position was sized for.  Replayed over the 21 credit ideas that spanned
+    a print, a live stop turned +$2,181 held into -$2,868 managed.  From E+2 the
+    stop is live again, against marks that are mostly intrinsic value.
+    """
+    e = marketcal.parse_date(earnings_date)
+    return marketcal.next_trading_day(marketcal.next_trading_day(e)).isoformat()
+
+
+def build_targets(position, spot, sigma_p, drift_p, now=None, horizon_frac=0.6,
+                  earnings_date=None):
     """The take-profit / stop ladder, priced and probability-weighted.
 
     Each rung answers three questions a trader actually asks:
@@ -560,9 +579,14 @@ def build_targets(position, spot, sigma_p, drift_p, now=None, horizon_frac=0.6):
     stop = {"name": "STOP", "pnl": stop_pnl, "desc": stop_label,
             "spread_price": entry + stop_pnl}
     resolve(stop, stop_pnl)
+    if (earnings_date and getattr(config, "EARNINGS_STOP_HOLD", False)
+            and marketcal.session_date() <= earnings_date <= position.near_expiry):
+        stop["armed_from"] = stop_armed_from(earnings_date)
+        stop["desc"] += "; not armed until %s (earnings %s)" % (stop["armed_from"],
+                                                               earnings_date.isoformat())
 
     time_stop = None
-    if dte_total > config.TIME_STOP_DTE:
+    if position.cal_dte(now) > config.TIME_STOP_DTE:
         d = position.near_expiry - dt.timedelta(days=config.TIME_STOP_DTE)
         time_stop = {"name": "TIME", "date": d.isoformat(),
                      "desc": "close at %d DTE -- gamma risk outruns theta" % config.TIME_STOP_DTE}
@@ -581,8 +605,10 @@ def horizon_for(position, t_vol_expiry, now=None):
     now = now or marketcal.now_utc()
     dte = max(position.dte(now), 0.05)
     days = dte * config.EVAL_HORIZON_FRAC
-    if dte > config.TIME_STOP_DTE:
-        days = min(days, dte - config.TIME_STOP_DTE)
+    # Days to the time stop in CALENDAR days -- the unit the stop fires in.
+    cal = position.cal_dte(now)
+    if cal > config.TIME_STOP_DTE:
+        days = min(days, cal - config.TIME_STOP_DTE)
     days = max(days, 1.0)
     et = marketcal.to_et(now).replace(tzinfo=None).date() + dt.timedelta(days=int(round(days)))
     if et >= position.near_expiry:

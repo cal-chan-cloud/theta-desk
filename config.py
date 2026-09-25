@@ -252,9 +252,16 @@ CONCENTRATION_MAX_RECENT = 4     # appearances on recent boards before we stop a
 # Calibration is applied as a shrink toward the measured realised rate, damped
 # by CALIB_WEIGHT so 152 observations in one six-week regime cannot fully
 # dictate the model.  Raise CALIB_WEIGHT as the sample grows.
+#
+# Refit 2026-09-25 on 191 settled ideas (RAW model POP vs held-to-expiry win):
+#   credit  n=80   raw 76.7%  realised 70.0%   ratio 0.91
+#   debit   n=111  raw 38.7%  realised 17.1%   ratio 0.44
+# Same verdict, slightly less extreme for debit.  Fit on RAW POP only -- boards
+# since 09-24 store the calibrated number in `pop` and the raw one in
+# metrics.pop_raw; fitting on `pop` would calibrate twice.
 POP_CALIBRATION = True
 POP_CALIB_WEIGHT = 0.6           # 0 = trust the model, 1 = trust the sample
-POP_CALIB_FACTOR = {"credit": 0.94, "debit": 0.37}
+POP_CALIB_FACTOR = {"credit": 0.91, "debit": 0.44}
 
 # The floors above were set by counterfactual, not taste.  Replaying the 152
 # resolved ideas with different debit POP floors:
@@ -301,6 +308,25 @@ DEBIT_TP3_FRAC = 2.00
 DEBIT_STOP_FRAC = 0.50           # -50% on premium paid
 TIME_STOP_DTE = 21               # gamma risk ramps below this
 
+# Never open a trade the time stop will close almost at once.  On 2026-09-24
+# fourteen of the 25 ideas used the Oct-16 expiry at 22 calendar days: the
+# scanner scored them on a 0.7-day horizon (DTE - 21) and the time stop closed
+# them the next session -- a round-trip bid-ask paid for one day of theta.  An
+# expiry is tradable only if it is inside the time stop already (held to
+# expiry, no time stop) or leaves at least this many calendar days before it.
+# DTE is counted in calendar days from the session date everywhere, which is
+# how the time stop has always been enforced.
+MIN_DAYS_BEFORE_TIME_STOP = 7
+
+# A stop on a position that spans an earnings print is not armed until the
+# second session after the print (see replay.stop_armed_from).  Measured over
+# the 21 credit ideas that spanned one: held +$2,181, managed with a live stop
+# -$2,868 -- the stop fired on the gap-day mark every time.  Positions that
+# span a print must be defined-risk (EARNINGS_NAKED_OK below), so switching
+# the stop off for two sessions cannot cost more than the width.
+EARNINGS_STOP_HOLD = True
+EARNINGS_NAKED_OK = False
+
 # --------------------------------------------------------------------------
 # Does the forward test obey the model's OWN exit rules?
 #
@@ -322,6 +348,17 @@ TIME_STOP_DTE = 21               # gamma risk ramps below this
 # result is regime-dependent (this was a quiet stretch where short premium
 # mostly expired worthless) so the policy is left alone; what is fixed is the
 # measurement.
+#
+# 2026-09-25: those figures came from three measurements with three rule sets.
+# replay.py is now the one exit engine (all three rules, stops and time exits
+# filled at the mark less exit cost, gap days priced from stored surfaces) and
+# sync_exits writes its answer into the idea table each run.  On 191 settled
+# ideas:                         meanR      net
+#   hold to expiry              -0.284   -$42,144
+#   managed, stop live on print -0.087   -$19,816
+#   managed, stop held on print -0.047   -$13,567   <- current rules
+#     of which credit           +0.025    +$1,142
+#     of which debit            -0.099   -$14,709
 MANAGED_EXITS = True
 
 # --------------------------------------------------------------------------

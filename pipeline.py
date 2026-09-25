@@ -417,6 +417,11 @@ def mark_book(rolls):
     n_tr = journal.mark_open_trades(rolls, today)
     n_id = journal.mark_ideas(rolls, today)
     log("marked %d open trades, %d prior ideas", n_tr, n_id)
+    # Exits are re-derived from the whole mark history every run (replay.py is
+    # the single exit engine), so a missed day corrects itself here.
+    import replay
+    ex = replay.sync_exits(today)
+    log("idea exits: %d managed, %d settled, %d open", ex["exits"], ex["settled"], ex["open"])
     return n_tr, n_id
 
 

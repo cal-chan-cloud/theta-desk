@@ -790,6 +790,124 @@ def test_settlement_and_pop_calibration():
           config.MIN_POP_DEBIT >= 0.45, "%.2f" % config.MIN_POP_DEBIT)
 
 
+def test_exit_engine():
+    section("time stop, earnings and the exit engine")
+    import json
+    import replay
+    today = marketcal.session_date()
+    ts = config.TIME_STOP_DTE
+
+    # --- one DTE for every time-stop decision -------------------------------
+    check("calendar_dte counts whole days from the session date",
+          marketcal.calendar_dte(today + dt.timedelta(days=22)) == 22)
+    gap = [d for d in range(0, 60) if scanner.in_time_stop_gap(d)]
+    check("the dead zone is (TIME_STOP, TIME_STOP + MIN_DAYS)",
+          gap == list(range(ts + 1, ts + config.MIN_DAYS_BEFORE_TIME_STOP)), "%s" % gap)
+
+    exps = [{"expiry": (today + dt.timedelta(days=d)).isoformat(), "dte": d - 0.3}
+            for d in (14, ts + 1, ts + 7, 36)]
+    picked = [p["dte"] for p in scanner.pick_expiries(exps, limit=4)]
+    check("the picker never offers an expiry the time stop closes within days",
+          all(not scanner.in_time_stop_gap(round(d + 0.3)) for d in picked) and len(picked) == 3,
+          "%s" % picked)
+    earn = today + dt.timedelta(days=ts - 1)
+    picked = scanner.pick_expiries(exps, earnings_date=earn, limit=1)
+    check("...including the post-earnings expiry it adds",
+          all(not scanner.in_time_stop_gap(round(p["dte"] + 0.3)) for p in picked),
+          "%s" % [p["dte"] for p in picked])
+
+    def pos(days, legs):
+        e = today + dt.timedelta(days=days)
+        return strategies.Position("T", legs[0], [strategies.Leg(r, k, e, q, px, 0.3, r=0.04)
+                                                  for r, k, q, px in legs[1]], 100.0)
+    bps = lambda d: pos(d, ("bull_put_spread", [("P", 95.0, -1, 2.5), ("P", 90.0, 1, 1.3)]))
+    lc = lambda d: pos(d, ("long_call", [("C", 105.0, 1, 3.0)]))
+    t_in = strategies.build_targets(bps(ts), 100.0, 0.30, 0.0)
+    t_out = strategies.build_targets(bps(ts + 1), 100.0, 0.30, 0.0)
+    check("an idea opened at %d calendar DTE has no time stop" % ts, t_in["time_stop"] is None)
+    check("one opened at %d calendar DTE does" % (ts + 1), t_out["time_stop"] is not None)
+    p10 = bps(ts + 10)
+    hm, _ = strategies.horizon_for(p10, 1.0)
+    # (a weekend run counts from Saturday's date while the session is Friday's)
+    slack = (marketcal.now_et().date() - today).days
+    stop_day = p10.near_expiry - dt.timedelta(days=ts)
+    check("the horizon never runs past the time stop (in calendar days)",
+          today < marketcal.to_et(hm).date() <= stop_day + dt.timedelta(days=slack),
+          "%s vs stop %s" % (marketcal.to_et(hm).date(), stop_day))
+
+    # --- structural blocks ---------------------------------------------------
+    check("long premium is not opened inside the time stop",
+          scanner.structural_block(lc(ts), {}, False)[0] is not None)
+    check("...but is outside it", scanner.structural_block(lc(ts + 10), {}, False)[0] is None)
+    check("short premium inside the time stop is allowed (held to expiry)",
+          scanner.structural_block(bps(10), {}, False)[0] is None)
+    ed = {"earnings_date": (today + dt.timedelta(days=5)).isoformat()}
+    strangle = pos(30, ("short_strangle", [("P", 90.0, -1, 1.0), ("C", 110.0, -1, 1.0)]))
+    check("undefined risk may not span an earnings print",
+          scanner.structural_block(strangle, ed, True)[0] is not None)
+    blk, e = scanner.structural_block(bps(30), ed, False)
+    check("defined risk may, and the print is reported", blk is None and e is not None)
+    check("a print after expiry is not 'inside' the trade",
+          scanner.structural_block(bps(3), ed, False)[1] is None)
+
+    # --- the stop is held off across a print ---------------------------------
+    check("Tuesday print -> stop armed Thursday",
+          strategies.stop_armed_from("2026-10-13") == "2026-10-15")
+    check("Friday print -> stop armed Tuesday",
+          strategies.stop_armed_from("2026-10-16") == "2026-10-20")
+    tg = strategies.build_targets(bps(30), 100.0, 0.30, 0.0,
+                                  earnings_date=today + dt.timedelta(days=5))
+    check("the plan records when its stop is armed",
+          tg["stop"].get("armed_from") == strategies.stop_armed_from(today + dt.timedelta(days=5)))
+    check("no print, no hold", "armed_from" not in t_out["stop"])
+
+    # --- apply_plan on a synthetic series --------------------------------------
+    legs = [{"right": "P", "strike": 95.0, "expiry": "2026-11-20", "qty": -1, "bid": 2.4, "ask": 2.6},
+            {"right": "P", "strike": 90.0, "expiry": "2026-11-20", "qty": 1, "bid": 1.2, "ask": 1.4}]
+    idea = {"asof_date": "2026-10-09", "expiry": "2026-11-20", "entry_price": -1.2,
+            "legs_json": json.dumps(legs),
+            "targets_json": json.dumps({"targets": [{"name": "T1", "pnl": 0.6}],
+                                        "stop": {"pnl": -2.4}})}
+    cost = replay.exit_cost(legs)
+    check("exit cost is the entry's share of the spread",
+          close(cost, config.SLIPPAGE_FRAC_OF_SPREAD * 0.4 * 100, 1e-9), "%.2f" % cost)
+    s_stop = [("2026-10-12", -10.0, "stored"), ("2026-10-13", -300.0, "stored"),
+              ("2026-10-14", 80.0, "stored")]
+    r = replay.apply_plan(idea, s_stop, earnings_date=None)
+    check("a stop fills at the mark LESS exit cost, not at the stop",
+          r["reason"] == "STOP" and close(r["pnl"], -300.0 - cost, 1e-9), "%s" % r)
+    r = replay.apply_plan(idea, s_stop, earnings_date="2026-10-12")
+    check("...but is not armed through a print (E+1 = the gap day)",
+          r["reason"] == "T1" and r["exit_date"] == "2026-10-14", "%s" % r)
+    check("T1 fills at its threshold", close(r["pnl"], 60.0, 1e-9))
+    r = replay.apply_plan(idea, [("2026-10-12", 60.0 + cost - 1, "stored")])
+    check("T1 needs the mark to clear it NET of exit cost", r["reason"] == "OPEN", "%s" % r)
+    r = replay.apply_plan(idea, [("2026-10-12", 5.0, "stored"), ("2026-10-30", 12.0, "gapfill")])
+    check("the time stop fires at %d calendar DTE, at the mark less cost" % ts,
+          r["reason"] == "TIME" and close(r["pnl"], 12.0 - cost, 1e-9), "%s" % r)
+    near = dict(idea, asof_date="2026-10-30")
+    r = replay.apply_plan(near, [("2026-11-02", 5.0, "stored"), ("2026-11-20", 120.0, "settle")])
+    check("an idea opened inside the time stop runs to expiry, settled free of cost",
+          r["reason"] == "EXPIRY" and close(r["pnl"], 120.0, 1e-9), "%s" % r)
+
+    # --- the engine writes one consistent answer into the idea table ---------
+    db.init()
+    a = replay.sync_exits(lookback_days=400)
+    snap = db.q("SELECT id, exit_date, exit_reason, exit_pnl, held_pnl FROM idea ORDER BY id")
+    b = replay.sync_exits(lookback_days=400)
+    check("sync_exits is idempotent",
+          a == b and snap == db.q("SELECT id, exit_date, exit_reason, exit_pnl, held_pnl FROM idea ORDER BY id"))
+    bad = db.q("""SELECT id FROM idea WHERE exit_reason IN ('T1','STOP','TIME')
+                   AND (exit_date <= asof_date OR exit_date > expiry)""")
+    check("every managed exit lands between the open and expiry", not bad, "%s" % bad[:5])
+    bad = db.q("""SELECT id FROM idea WHERE exit_reason = 'TIME'
+                   AND julianday(expiry) - julianday(asof_date) <= ?""", (ts,))
+    check("no idea opened inside the time stop is time-stopped", not bad, "%s" % bad[:5])
+    bad = db.q("""SELECT id FROM idea WHERE expiry < ? AND asof_date < expiry
+                   AND held_pnl IS NULL AND exit_reason IS NOT NULL""", (today.isoformat(),))
+    check("every settled idea carries its held-to-expiry value", not bad, "%s" % bad[:5])
+
+
 def test_scanner():
     section("scanner regimes")
     check("high IV vs forecast reads rich",
@@ -811,8 +929,8 @@ def test_scanner():
           "bull_put_spread" in scanner.STRATEGY_MATRIX[("bullish", "rich")])
     check("neutral+cheap buys volatility",
           any(s in scanner.EVENT_STRATEGIES for s in scanner.STRATEGY_MATRIX[("neutral", "cheap")]))
-    exps = [{"expiry": "2026-09-18", "dte": 36}, {"expiry": "2026-08-21", "dte": 8},
-            {"expiry": "2026-12-18", "dte": 127}]
+    today = marketcal.session_date()
+    exps = [{"expiry": (today + dt.timedelta(days=d)).isoformat(), "dte": d} for d in (36, 8, 127)]
     picked = scanner.pick_expiries(exps)
     check("expiry picker prefers the 25-50 day band",
           picked and abs(picked[0]["dte"] - 36) < 1e-9, "%s" % [p["dte"] for p in picked])
@@ -1080,6 +1198,7 @@ def main():
     test_vol_calibration()
     test_board_construction()
     test_settlement_and_pop_calibration()
+    test_exit_engine()
     test_scanner()
     test_db()
     if live:

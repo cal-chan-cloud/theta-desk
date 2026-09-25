@@ -244,9 +244,13 @@ CREATE TABLE IF NOT EXISTS idea (
     -- Managed exit: once a target or stop is hit the idea is CLOSED and its
     -- P&L frozen.  Without this the forward test silently measures
     -- hold-to-expiry, which is not the strategy the model recommends.
+    -- Written ONLY by replay.sync_exits, the single exit engine.
     exit_date     TEXT,
     exit_reason   TEXT,
     exit_pnl      REAL,
+    -- Value held to expiry (settled at the expiry-date close).  What POP is
+    -- calibrated against: POP is an expiry statistic, a managed exit is not.
+    held_pnl      REAL,
     UNIQUE (asof_date, symbol, strategy, expiry, legs_json)
 );
 CREATE INDEX IF NOT EXISTS ix_idea_date ON idea(asof_date DESC, score DESC);

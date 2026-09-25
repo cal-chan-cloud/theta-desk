@@ -24,8 +24,12 @@ if (-not (Test-Path $bat)) { throw "run_daily.bat not found at $bat" }
 # Doubled inner quotes -- see note 1 above.
 $action = New-ScheduledTaskAction -Execute "cmd.exe" -Argument "/c `"`"$bat`"`"" -WorkingDirectory $root
 
-# 07:10 ET is after the option chains refresh for the new session but well
-# before the open, so the board is ready when you sit down.
+# The trigger is in the machine's LOCAL time zone, and this machine runs on
+# Pacific time: 07:10 PT = 10:10 ET, forty minutes after the open, with
+# repetitions at 14:10 ET (intraday) and 18:10 ET -- the last one is after the
+# close, and it is the run that captures the settled session and marks the
+# board against closing prices.  (An earlier version of this comment said
+# "07:10 ET", which is not what the scheduler does.)
 #
 # The trigger REPEATS every 4 hours for 12 hours, and that is not about
 # intraday freshness -- it is a catch-up.  On 2026-08-20 the machine was asleep
@@ -55,7 +59,7 @@ try { Unregister-ScheduledTask -TaskName $taskName -Confirm:$false } catch { }
 Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger `
     -Settings $settings -Description "Theta Desk: refresh option chains, prices, news and the daily trade board." | Out-Null
 
-Write-Output "Registered '$taskName' -- daily at 07:10."
+Write-Output "Registered '$taskName' -- daily at 07:10 local time, repeating every 4h for 12h."
 Write-Output ""
 Write-Output "Verify with:"
 Write-Output "  Get-ScheduledTaskInfo -TaskName '$taskName'"
